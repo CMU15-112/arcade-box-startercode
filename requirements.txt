@@ -1,0 +1,2 @@
+# This file contains a list of the python packages that this project requires
+cmu-graphics
