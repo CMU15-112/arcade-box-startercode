@@ -10,7 +10,10 @@ This documentation is a work in progress.
 
 ## Porting Your Game
 
-As a first step, I recommend that you make your initial designs using keyboard input.  The reason for this is simple:  The arcade box is a fun way to play a game, but it isn't a great way to test/debug.  You'll want to be able to do that on your local machine.  After you have a basic game working (such as MVP), then make arcade box support one of your post-MVP features.
+If you are considering porting your game to the arcade box, there are two things you should do first:
+
+1. Set your game's resolution to 800x600 by doing `runApp(width=800, height=600)`.  (This is resolution of the arcade box.)  Other resolutions won't look quite right.
+2. I recommend that you make your initial designs using keyboard input.  The reason for this is simple:  The arcade box is a fun way to play a game, but it isn't a great way to test/debug.  You'll want to be able to do that on your local machine.  After you have a basic game working (such as MVP), then make arcade box support one of your post-MVP features.
 
 Once you are ready to add arcade box support to your game, simply copy [`joystick.py`](https://github.com/CMU15-112/arcade-box-startercode/blob/main/joystick.py) from this repository into your project, and `import joystick` at the top of your file.  Look into ([`main.py`](https://github.com/CMU15-112/arcade-box-startercode/blob/main/main.py)) in this repository to see how it works.
 
@@ -21,7 +24,7 @@ In short, there are new callback functions that get called automatically when bu
 ```python
 def onJoyPress(app, button, joystick):
     if button == '5':
-        sys.exit(-1)
+        sys.exit(0)
 ```
 
 This will cause your game to quit if someone presses the P1 button on the arcade box.
@@ -42,12 +45,45 @@ When you select your game from the menu, the following happens:
 2. Any Python libraries listed in `requirements.txt` are downloaded and installed
 3. The file `main.py` is run.
 
+### Format of `requirements.txt`
+
+Just list the packages you need, each on their own line.  For example:
+
+```
+cmu-graphics
+urllib3
+```
+
+If you need a specific version of a package, that is also possible:
+
+```
+cmu-graphics
+urllib3==1.26.5
+```
+
+(This is just a [pip requirements file](https://pip.pypa.io/en/stable/reference/requirements-file-format/))
+
+## The Reset Button
+
+The proper way to quit your program is just to call `sys.exit(0)`.  Please make sure that you have a button input that triggers this.  The easiest way is to just do something like:
+
+```python
+def onJoyPress(app, button, joystick):
+    if button == '5':
+        sys.exit(0)
+```
+Which uses the P1 button to quit.
+
+If things go horrible wrong, and you can't quit your program, there is a reset button on the front of the box that does a *hard reset* of the machine.  Please use this sparingly, as frequent hard resets increase the chances of filesystem corruption.
+
+## Security
+
+This box is not secured.  You could do all sorts of horrible things to it.  Please don't.
+
 ## Random Things
 
 Things that I don't want to forget, but need to be better organized later.
 
-- There is a reset button on the front of the box that does a hard reset of the machine.  Please use this sparingly, as frequent hard resets increase the chances of filesystem corruption.
 - The joystick library ([`joystick.py`](https://github.com/CMU15-112/arcade-box-startercode/blob/main/joystick.py)) supports more than just the arcade box.  It also works with various gamepads.  For example, I've tested it with both PS4 and Nintendo Switch controllers connected to a PC via USB or Bluetooth.
-- The arcade box supports a native resolution of 800x600.  You should use this resolution for your game.  (`runApp(width=800, height=600)`)
 - I've never tested sound.  Maybe it works?
-- The `cmu_graphics` library is not very efficient, and the CPU inside of the arcade box is not super high powered.  You'll need to be careful not to have too much complication in `redrawAll`.
+- The `cmu_graphics` library is not very efficient, and the CPU inside of the arcade box is not super high powered.  You'll need to be careful not to have too much complication in `redrawAll` or `onStep`.
