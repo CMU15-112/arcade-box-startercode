@@ -33,7 +33,7 @@ def onJoyPress(app, button, joystick):
         app.player.getSmaller()
     # Make sure we can exit by pressing the "P1" button
     elif button == '5':
-        sys.exit(-1)
+        sys.exit(0)
 
 def onJoyRelease(app, button, joystick):
     """Tells you when a button is released on which joystick"""
