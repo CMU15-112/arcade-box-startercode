@@ -8,10 +8,10 @@
 | a            | 1      |
 | x            | 2      |
 | y            | 3      |
-| insert money | 4      |
+| Insert money | 4      |
 | p1           | 5      |
-| select       | 8      |
-| start        | 9      |
+| Select       | 8      |
+| Start        | 9      |
 
 
 ### Nintendo Switch controller:
@@ -23,16 +23,41 @@
 | x                      | 2      |
 | y                      | 3      |
 | -                      | 4      |
-| home                   | 5      |
+| Home                   | 5      |
 | +                      | 6      |
-| left joystick press    | 7      |
-| right joystick press   | 8      |
+| Left joystick press    | 7      |
+| Right joystick press   | 8      |
 | L                      | 9      |
 | R                      | 10     |
-| pad up                 | 11     |
-| pad down               | 12     |
-| pad left               | 13     |
-| pad right              | 14     |
-| clip                   | 15     |
+| Pad up                 | 11     |
+| Pad down               | 12     |
+| Pad left               | 13     |
+| Pad right              | 14     |
+| Clip                   | 15     |
 
-(There might be others but you should do your own tests and we will be happy to add them to this file for other users ;) 
+
+### PS5 controller:
+
+| Key                    | Map    |
+|------------------------|--------|
+| X                      | 0      |
+| O                      | 1      |
+| Square                 | 2      |
+| Triangle               | 3      |
+| Share Media            | 4      |
+| Home                   | 5      |
+| Option                 | 6      |
+| Left joystick press    | 7      |
+| Right joystick press   | 8      |
+| L                      | 9      |
+| R                      | 10     |
+| Pad up                 | 11     |
+| Pad down               | 12     |
+| Pad left               | 13     |
+| Pad right              | 14     |
+| TouchPad               | 15     |
+| Mute                   | 16     |
+
+You can also create a table for other controllers using testController.py, if they are compatible.
+
+(Share them with us so everyone can benefit :)
