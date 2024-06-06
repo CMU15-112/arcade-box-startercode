@@ -29,6 +29,10 @@ def onJoyPress(app, button, joystick):
 
 This will cause your game to quit if someone presses the P1 button on the arcade box.
 
+## Key-Map info:
+
+Checkout Key-Map.md to know which physical button correspond to what number (which is registered in the button argument of your onJoyPress function).
+
 ## Getting Your Code onto the Arcade Box
 
 So, you have your fancy game, you've added some basic joystick support (and a quit key!) and you want to run it on the arcade box.  How do we make that happen?
