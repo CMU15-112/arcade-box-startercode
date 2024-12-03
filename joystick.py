@@ -12,6 +12,11 @@ _allDigitalJoyAxisDown = dict()
 _lastJoyAxis = dict()
 _joysticks = dict()
 
+# If this user releases all joystick presses, trigger
+# onDigitalJoyAxis one more time with an empty list
+# so that we can tell it was released.
+_digitalJoyAxisSendEmpty = dict()
+
 
 def handlePygameEvent(event, callUserFn, app):
     if event.type == pygame.JOYDEVICEADDED:
@@ -19,6 +24,7 @@ def handlePygameEvent(event, callUserFn, app):
         _joysticks[joy.get_instance_id()] = joy
         _allJoyButtonsDown[joy.get_instance_id()] = set()
         _allDigitalJoyAxisDown[joy.get_instance_id()] = set()
+        _digitalJoyAxisSendEmpty[joy.get_instance_id()] = False
         joy.rumble(0, 0.7, 500)  # Rumble if it can and is connected
     elif event.type == pygame.JOYDEVICEREMOVED:
         del _joysticks[event.instance_id]
@@ -48,7 +54,10 @@ def handleOnStepEvent(callUserFn, app):
     for joystick in _allDigitalJoyAxisDown:
         if len(_allDigitalJoyAxisDown[joystick]) > 0:
             callUserFn('onDigitalJoyAxis', (list(_allDigitalJoyAxisDown[joystick]), joystick))
-
+            _digitalJoyAxisSendEmpty[joystick] = True
+        elif _digitalJoyAxisSendEmpty[joystick]:
+            callUserFn('onDigitalJoyAxis', (list(_allDigitalJoyAxisDown[joystick]), joystick))
+            _digitalJoyAxisSendEmpty[joystick] = False
 
 onStepEvent.connect(handleOnStepEvent)
 
