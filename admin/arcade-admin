@@ -1,0 +1,1027 @@
+#!/usr/bin/env python3
+"""arcade-admin: manage the student games on the CMU-Q arcade box.
+
+Run it over SSH on the box (as user `es`):
+
+    arcade-admin                 interactive menu
+    arcade-admin list            table of games
+    arcade-admin add URL         add a game (public -> HTTPS, private -> deploy key)
+    arcade-admin --help          everything else
+
+See docs/ADMIN.md in the arcade-box-starter repo for the full story.
+This tool is deliberately not reachable from the EmulationStation menu.
+"""
+
+import argparse
+import contextlib
+import datetime
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Locations on the box
+# ---------------------------------------------------------------------------
+
+HOME = Path.home()
+ROMS = HOME / "RetroPie/roms/cmu_graphics"                 # scanned by ES
+DISABLED = HOME / "RetroPie/roms/cmu_graphics-disabled"    # not scanned by ES
+STUFF = HOME / "stuff"
+LAUNCHER = STUFF / "112.sh"
+FROZEN = STUFF / "frozen"
+GAMELIST = Path("/opt/retropie/configs/all/emulationstation/gamelists/112/gamelist.xml")
+SSH_DIR = HOME / ".ssh"
+SSH_CONFIG = SSH_DIR / "config"
+SSH_DEAD = SSH_DIR / "dead"
+VENV = "retropie-venv"
+
+ES_BIN = "/opt/retropie/supplementary/emulationstation/emulationstation"
+ES_RESTART_FLAG = Path("/tmp/es-restart")
+UID = os.getuid()
+DESKTOP_ENV = {
+    "DISPLAY": ":0",
+    "XAUTHORITY": f"/run/user/{UID}/gdm/Xauthority",
+    "DBUS_SESSION_BUS_ADDRESS": f"unix:path=/run/user/{UID}/bus",
+    "XDG_RUNTIME_DIR": f"/run/user/{UID}",
+}
+
+NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+GITHUB_RE = re.compile(
+    r"^(?:https?://github\.com/|git@github\.com:|ssh://git@github\.com/)?"
+    r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
+
+
+class AdminError(Exception):
+    """A problem to report to the admin (no traceback)."""
+
+
+class Declined(Exception):
+    """The admin said no to a confirmation; abandon the operation quietly."""
+
+
+# ---------------------------------------------------------------------------
+# User interaction
+# ---------------------------------------------------------------------------
+
+class UI:
+    """Plain-text prompts. `assume_yes` answers yes to every confirmation."""
+
+    def __init__(self, assume_yes=False):
+        self.assume_yes = assume_yes
+        self.interactive = sys.stdin.isatty()
+
+    def info(self, msg=""):
+        print(msg, flush=True)
+
+    def warn(self, msg):
+        print(f"WARNING: {msg}", flush=True)
+
+    def header(self, title):
+        print(f"\n== {title} ==", flush=True)
+
+    def confirm(self, question, default=False, destructive=False):
+        if self.assume_yes:
+            return True
+        if not self.interactive:
+            if destructive:
+                raise AdminError(f"'{question}' needs confirmation; rerun with --yes")
+            return default
+        hint = "[Y/n]" if default else "[y/N]"
+        while True:
+            ans = input(f"{question} {hint} ").strip().lower()
+            if not ans:
+                return default
+            if ans in ("y", "yes"):
+                return True
+            if ans in ("n", "no"):
+                return False
+
+    def ask(self, question, default=None):
+        if not self.interactive:
+            if default is None:
+                raise AdminError(f"'{question}' needs an answer; pass it as an option")
+            return default
+        suffix = f" [{default}]" if default else ""
+        ans = input(f"{question}{suffix}: ").strip()
+        return ans or (default or "")
+
+    def choose(self, title, options):
+        """options: list of (tag, description). Returns a tag or None."""
+        print(f"\n{title}")
+        for i, (tag, desc) in enumerate(options, 1):
+            print(f"  {i:2}) {tag:<32} {desc}")
+        ans = input("Choice (blank to go back): ").strip()
+        if ans.isdigit() and 1 <= int(ans) <= len(options):
+            return options[int(ans) - 1][0]
+        return None
+
+    def pause(self):
+        if self.interactive:
+            input("\nPress Enter to continue...")
+
+    def clear(self):
+        pass
+
+
+class DialogUI(UI):
+    """Uses `dialog` for menus. Everything else stays plain text so command
+    output (git, pip, warnings) remains visible on the SSH terminal."""
+
+    def choose(self, title, options):
+        cmd = ["dialog", "--stdout", "--title", "arcade-admin", "--menu", title,
+               "0", "0", "0"]
+        for tag, desc in options:
+            cmd += [tag, desc or " "]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+        self.clear()
+        return res.stdout.strip() if res.returncode == 0 else None
+
+    def clear(self):
+        subprocess.run(["clear"])
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+def run(cmd, *, cwd=None, env=None, check=True, capture=False, quiet=False):
+    """Run a command. Output streams to the terminal unless capture=True."""
+    if not quiet and not capture:
+        print(f"$ {' '.join(str(c) for c in cmd)}", flush=True)
+    full_env = None
+    if env:
+        full_env = {**os.environ, **env}
+    res = subprocess.run(
+        [str(c) for c in cmd], cwd=cwd, env=full_env, text=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.STDOUT if capture else None,
+    )
+    if check and res.returncode != 0:
+        out = f"\n{res.stdout.strip()}" if capture and res.stdout else ""
+        raise AdminError(f"command failed ({res.returncode}): {' '.join(map(str, cmd))}{out}")
+    return res
+
+
+def stamp():
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def backup(path):
+    if path.exists():
+        dest = path.with_name(f"{path.name}.bak-{stamp()}")
+        shutil.copy2(path, dest)
+        return dest
+    return None
+
+
+def validate_name(name):
+    name = name.removesuffix(".git")
+    if not NAME_RE.match(name):
+        raise AdminError(f"'{name}' is not a valid game name: use only letters, digits, - and _ "
+                         "(112.sh can't handle spaces or other characters)")
+    for base in (ROMS, DISABLED):
+        if (base / f"{name}.git").exists():
+            raise AdminError(f"a game named '{name}' already exists in {base}")
+    return name
+
+
+def parse_github(url):
+    m = GITHUB_RE.match(url.strip())
+    if not m:
+        raise AdminError(f"don't understand repo '{url}'. Use https://github.com/OWNER/REPO, "
+                         "git@github.com:OWNER/REPO or OWNER/REPO")
+    return m.group(1), m.group(2)
+
+
+def git_quiet_env():
+    return {"GIT_TERMINAL_PROMPT": "0", "GIT_SSH_COMMAND": "ssh -o BatchMode=yes"}
+
+
+def can_reach(url):
+    res = run(["git", "ls-remote", "-q", url, "HEAD"], env=git_quiet_env(),
+              check=False, capture=True)
+    return res.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# Games
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Game:
+    name: str          # without .git
+    path: Path
+    enabled: bool
+
+    @property
+    def dirname(self):
+        return f"{self.name}.git"
+
+    @property
+    def lock(self):
+        return FROZEN / f"{self.dirname}.txt"
+
+    @property
+    def venv(self):
+        return self.path / VENV
+
+    @property
+    def frozen(self):
+        return self.lock.exists()
+
+    def git(self, *args):
+        res = run(["git", "-C", self.path, *args], check=False, capture=True)
+        return res.stdout.strip() if res.returncode == 0 else ""
+
+    @property
+    def remote(self):
+        return self.git("remote", "get-url", "origin")
+
+    @property
+    def branch(self):
+        return self.git("branch", "--show-current") or "?"
+
+    @property
+    def transport(self):
+        url = self.remote
+        if url.startswith("http"):
+            return "https"
+        m = re.match(r"^(?:ssh://)?git@([^:/]+)[:/]", url)
+        if not m:
+            return "?" if url else "(no remote)"
+        host = m.group(1)
+        return "ssh-default" if host == "github.com" else f"alias:{host}"
+
+    @property
+    def ssh_alias(self):
+        t = self.transport
+        return t.split(":", 1)[1] if t.startswith("alias:") else None
+
+
+def all_games():
+    games = []
+    for base, enabled in ((ROMS, True), (DISABLED, False)):
+        if base.is_dir():
+            for p in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+                if p.is_dir() and p.name.endswith(".git"):
+                    games.append(Game(p.name[:-4], p, enabled))
+    return games
+
+
+def find_game(query):
+    q = query.removesuffix(".git").lower()
+    games = all_games()
+    exact = [g for g in games if g.name.lower() == q]
+    if exact:
+        return exact[0]
+    pref = [g for g in games if g.name.lower().startswith(q)]
+    if len(pref) == 1:
+        return pref[0]
+    if not pref:
+        raise AdminError(f"no game matches '{query}' (try `arcade-admin list`)")
+    raise AdminError(f"'{query}' is ambiguous: {', '.join(g.name for g in pref)}")
+
+
+# ---------------------------------------------------------------------------
+# EmulationStation control
+# ---------------------------------------------------------------------------
+
+def _pids_where(pred):
+    pids = []
+    for d in Path("/proc").iterdir():
+        if d.name.isdigit() and int(d.name) != os.getpid():
+            try:
+                if pred(d):
+                    pids.append(int(d.name))
+            except OSError:
+                pass
+    return pids
+
+
+def es_pid():
+    pids = _pids_where(lambda d: os.readlink(d / "exe") == ES_BIN)
+    return pids[0] if pids else None
+
+
+def game_running():
+    launcher = str(LAUNCHER).encode()
+    return bool(_pids_where(lambda d: launcher in (d / "cmdline").read_bytes()))
+
+
+def stop_es():
+    pid = es_pid()
+    if pid is None:
+        return
+    if game_running():
+        raise AdminError("a game is running on the arcade box right now; quit it first")
+    ES_RESTART_FLAG.unlink(missing_ok=True)   # make the wrapper exit instead of relaunching
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(30):
+        if es_pid() is None:
+            return
+        time.sleep(0.5)
+    os.kill(pid, signal.SIGKILL)
+    time.sleep(1)
+
+
+def start_es(ui):
+    if es_pid() is not None:
+        return
+    subprocess.Popen(
+        ["gnome-terminal", "--maximize", "--", "emulationstation"],
+        env={**os.environ, **DESKTOP_ENV}, start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    for _ in range(40):
+        if es_pid() is not None:
+            ui.info("EmulationStation is running again.")
+            return
+        time.sleep(0.5)
+    ui.warn("EmulationStation did not come back. `sudo reboot` will always restore it.")
+    if ui.confirm("Reboot the arcade box now?"):
+        run(["sudo", "reboot"], check=False)
+
+
+def restart_es(ui):
+    if es_pid() is None:
+        ui.info("EmulationStation isn't running; starting it.")
+    else:
+        ui.info("Restarting EmulationStation...")
+        stop_es()
+    start_es(ui)
+
+
+@contextlib.contextmanager
+def es_paused(ui, why):
+    """Close ES for the duration of the block (if it's running), then bring it back."""
+    was_running = es_pid() is not None
+    if was_running:
+        if not ui.confirm(f"{why} needs EmulationStation closed on the arcade screen "
+                          "for a moment. Continue?", default=True):
+            raise Declined()
+        stop_es()
+    try:
+        yield
+    finally:
+        if was_running:
+            start_es(ui)
+
+
+def offer_es_restart(ui):
+    if es_pid() is None:
+        return
+    if ui.confirm("Restart EmulationStation now so its menu shows the change?"):
+        restart_es(ui)
+    else:
+        ui.info("The menu updates the next time EmulationStation starts (`arcade-admin restart-es`).")
+
+
+# ---------------------------------------------------------------------------
+# gamelist.xml (only touch while ES is stopped -- it rewrites the file on exit)
+# ---------------------------------------------------------------------------
+
+def gamelist_load():
+    if GAMELIST.exists():
+        return ET.parse(GAMELIST)
+    return ET.ElementTree(ET.Element("gameList"))
+
+
+def gamelist_entry(tree, dirname):
+    for g in tree.getroot().findall("game"):
+        if (g.findtext("path") or "").strip() == f"./{dirname}":
+            return g
+    return None
+
+
+def gamelist_save(tree):
+    assert es_pid() is None, "gamelist edited while EmulationStation is running"
+    GAMELIST.parent.mkdir(parents=True, exist_ok=True)
+    backup(GAMELIST)
+    ET.indent(tree, space="\t")
+    GAMELIST.write_text('<?xml version="1.0"?>\n'
+                        + ET.tostring(tree.getroot(), encoding="unicode") + "\n")
+
+
+def gamelist_info():
+    """{dirname: (display name, playcount)} read-only, safe any time."""
+    info = {}
+    try:
+        for g in gamelist_load().getroot().findall("game"):
+            p = (g.findtext("path") or "").strip().removeprefix("./")
+            info[p] = (g.findtext("name") or "", g.findtext("playcount") or "0")
+    except ET.ParseError:
+        pass
+    return info
+
+
+# ---------------------------------------------------------------------------
+# ~/.ssh/config
+# ---------------------------------------------------------------------------
+
+def ssh_blocks():
+    """List of (hosts, lines). The leading chunk before any Host has hosts=[]."""
+    blocks = [([], [])]
+    if SSH_CONFIG.exists():
+        for line in SSH_CONFIG.read_text().splitlines(keepends=True):
+            m = re.match(r"^\s*Host\s+(.+)$", line, re.IGNORECASE)
+            if m:
+                blocks.append((m.group(1).split(), [line]))
+            else:
+                blocks[-1][1].append(line)
+    return blocks
+
+
+def ssh_identity(alias):
+    for hosts, lines in ssh_blocks():
+        if alias in hosts:
+            for line in lines:
+                m = re.match(r"^\s*IdentityFile\s+(.+?)\s*$", line, re.IGNORECASE)
+                if m:
+                    return Path(os.path.expanduser(m.group(1)))
+            return None
+    return None
+
+
+def ssh_has_alias(alias):
+    return any(alias in hosts for hosts, _ in ssh_blocks())
+
+
+def ssh_add_alias(alias, keyfile):
+    backup(SSH_CONFIG)
+    text = SSH_CONFIG.read_text() if SSH_CONFIG.exists() else ""
+    if text and not text.endswith("\n"):
+        text += "\n"
+    text += f"\nHost {alias}\n\tHostname github.com\n\tUser git\n\tIdentityFile {keyfile}\n"
+    SSH_CONFIG.write_text(text)
+
+
+def ssh_remove_alias(alias):
+    blocks = ssh_blocks()
+    kept = [b for b in blocks if b[0] != [alias]]
+    if len(kept) == len(blocks):
+        return False
+    backup(SSH_CONFIG)
+    SSH_CONFIG.write_text("".join("".join(lines) for _, lines in kept).rstrip("\n") + "\n")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Virtual environments and lock files
+# ---------------------------------------------------------------------------
+
+def venv_python(game):
+    return game.venv / "bin" / "python"
+
+
+def pip_freeze(game):
+    py = venv_python(game)
+    if not py.exists():
+        return None
+    res = run([py, "-m", "pip", "freeze", "--exclude-editable"], capture=True, check=False)
+    if res.returncode != 0:
+        raise AdminError(f"pip freeze failed for {game.name}:\n{res.stdout}")
+    return res.stdout.strip()
+
+
+def write_lock(game, dest):
+    pkgs = pip_freeze(game)
+    if not pkgs:
+        return None
+    FROZEN.mkdir(parents=True, exist_ok=True)
+    today = datetime.date.today().isoformat()
+    dest.write_text(f"# Frozen {today} from {game.dirname}/{VENV} by arcade-admin\n{pkgs}\n")
+    return pkgs
+
+
+def pip_install(game, *args):
+    run([venv_python(game), "-m", "pip", "install", "--disable-pip-version-check", *args],
+        cwd=game.path)
+
+
+def build_venv(game):
+    """Same dependency steps as 112.sh."""
+    if not game.venv.exists():
+        run(["python3", "-m", "venv", game.venv])
+    req = game.path / "requirements.txt"
+    if game.frozen:
+        pip_install(game, "-r", game.lock)
+        if req.exists():
+            pip_install(game, "-r", req, "-c", game.lock)
+    elif req.exists():
+        pip_install(game, "-r", req)
+
+
+def rebuild_venv(game, lock):
+    shutil.rmtree(game.venv, ignore_errors=True)
+    run(["python3", "-m", "venv", game.venv])
+    if lock:
+        pip_install(game, "-r", lock)
+    else:
+        build_venv(game)
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_list(ui, args=None):
+    games = all_games()
+    gl = gamelist_info()
+    rows = [("NAME", "DISPLAY NAME", "STATE", "REPO", "BRANCH", "FROZEN", "VENV", "PLAYS")]
+    for g in games:
+        disp, plays = gl.get(g.dirname, ("", ""))
+        rows.append((
+            g.name,
+            disp if disp and disp != g.name else "-",
+            "enabled" if g.enabled else "DISABLED",
+            g.transport,
+            g.branch,
+            "yes" if g.frozen else "no",
+            "yes" if venv_python(g).exists() else "no",
+            plays or "-",
+        ))
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for r in rows:
+        ui.info("  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip())
+    ui.info(f"\n{sum(g.enabled for g in games)} enabled, {sum(not g.enabled for g in games)} disabled.")
+
+
+def sanity_check(ui, path):
+    warnings = []
+    if not (path / "main.py").exists():
+        warnings.append("no main.py at the top level; 112.sh only ever runs `python3 main.py`")
+    req = path / "requirements.txt"
+    if not req.exists():
+        warnings.append("no requirements.txt; dependencies won't be installed automatically")
+    else:
+        head = req.read_bytes()[:2]
+        if head in (b"\xff\xfe", b"\xfe\xff"):
+            ui.info("note: requirements.txt is UTF-16 (pip copes, but it's unusual)")
+    bundled = [p.name for p in (path / "cmu_graphics", path / "cmu_graphics.py") if p.exists()]
+    if bundled:
+        warnings.append(f"repo contains {', '.join(bundled)}, which shadows the pip-installed "
+                        "cmu_graphics and usually breaks the game")
+    has_exit = False
+    for py in path.rglob("*.py"):
+        if VENV in py.parts:
+            continue
+        try:
+            if "sys.exit" in py.read_text(errors="ignore"):
+                has_exit = True
+                break
+        except OSError:
+            pass
+    if not has_exit:
+        warnings.append("no sys.exit() found; the game may have no way to quit from the joystick")
+    for w in warnings:
+        ui.warn(w)
+    return warnings
+
+
+def setup_deploy_key(ui, owner, repo, key_id):
+    """Ensure Host alias + key exist and the repo is reachable. Returns the clone URL."""
+    alias = f"github-{key_id}"
+    users = [g.name for g in all_games() if g.ssh_alias == alias]
+    if users:
+        raise AdminError(f"key id '{key_id}' is already used by {', '.join(users)} "
+                         "(GitHub allows a deploy key on only one repo); pick another --key-id")
+    if ssh_has_alias(alias):
+        keyfile = ssh_identity(alias)
+        ui.info(f"Reusing existing Host {alias} ({keyfile}).")
+    else:
+        keyfile = SSH_DIR / f"id_ed25519.{key_id}"
+        if not keyfile.exists():
+            run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"arcade-box {key_id}",
+                 "-f", keyfile])
+        ssh_add_alias(alias, keyfile)
+        ui.info(f"Added Host {alias} to {SSH_CONFIG}.")
+    if keyfile is None or not Path(f"{keyfile}.pub").exists():
+        raise AdminError(f"can't find the public key for {alias}")
+    url = f"git@{alias}:{owner}/{repo}.git"
+    if can_reach(url):
+        return url
+    pub = Path(f"{keyfile}.pub").read_text().strip()
+    ui.info("\nThe student (or a repo admin) needs to add this deploy key:")
+    ui.info(f"  GitHub -> {owner}/{repo} -> Settings -> Deploy keys -> Add deploy key")
+    ui.info("  Leave 'Allow write access' UNCHECKED.\n")
+    ui.info(pub + "\n")
+    if not ui.interactive:
+        ui.info("Rerun the same command once the key has been added.")
+        sys.exit(3)
+    while True:
+        ans = input("Press Enter once the key is added to check again (or 'q' to stop here): ")
+        if ans.strip().lower() == "q":
+            ui.info("Stopped. Rerunning `add` later will reuse this key.")
+            raise Declined()
+        if can_reach(url):
+            ui.info("Key works.")
+            return url
+        ui.info("Still can't read the repo with that key.")
+
+
+def cmd_add(ui, args):
+    url_in = args.url or ui.ask("GitHub repo URL")
+    owner, repo = parse_github(url_in)
+    default_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo).strip("-") or "Game"
+    name = validate_name(args.name or ui.ask("Game folder name", default_name))
+    dest = ROMS / f"{name}.git"
+
+    ui.header(f"Adding {owner}/{repo} as {name}")
+    https_url = f"https://github.com/{owner}/{repo}.git"
+    if can_reach(https_url):
+        ui.info("Repo is public; cloning over HTTPS (no key needed).")
+        clone_url = https_url
+    else:
+        ui.info("Repo is private (or doesn't exist); setting up a deploy key.")
+        default_id = re.sub(r"[^a-z0-9_-]+", "-", owner.lower()).strip("-")
+        key_id = args.key_id or ui.ask("Key id (usually the student's Andrew ID)", default_id)
+        if not re.match(r"^[a-z0-9_-]+$", key_id):
+            raise AdminError("key id may only contain lowercase letters, digits, - and _")
+        clone_url = setup_deploy_key(ui, owner, repo, key_id)
+
+    run(["git", "clone", clone_url, dest], env=git_quiet_env())
+    game = Game(name, dest, True)
+    sanity_check(ui, dest)
+
+    ui.header("Installing dependencies")
+    build_venv(game)
+
+    if not args.no_launch and ui.interactive and ui.confirm(
+            "Test-launch it on the arcade screen now?", default=True):
+        launch(ui, game)
+        if ui.confirm("Did it work (including quitting)? Freeze its dependencies now?", default=True):
+            do_freeze(ui, game)
+    elif ui.confirm("Freeze its dependencies now (without a test launch)?"):
+        do_freeze(ui, game)
+
+    display = args.display
+    if display is None and ui.interactive:
+        display = ui.ask("Display name in the menu (blank = folder name)", "")
+    if display:
+        set_display_name(ui, game, display)
+        ui.info("(EmulationStation was restarted, so the new game is already in the menu.)")
+    else:
+        offer_es_restart(ui)
+    ui.info(f"\nDone: {name} is installed at {dest}.")
+
+
+def launch(ui, game):
+    if not game.enabled:
+        raise AdminError(f"{game.name} is disabled; enable it first")
+    with es_paused(ui, "A test launch"):
+        ui.info("Launching on the arcade screen; quit the game to come back here.")
+        run([LAUNCHER, game.path], env=DESKTOP_ENV, check=False)
+
+
+def cmd_launch(ui, args):
+    launch(ui, find_game(args.game))
+
+
+def do_freeze(ui, game):
+    pkgs = write_lock(game, game.lock)
+    if pkgs is None:
+        ui.info(f"SKIP  {game.name}: venv is missing or empty (launch it once first)")
+        return False
+    ui.info(f"OK    {game.name} -> {game.lock}")
+    for line in pkgs.splitlines():
+        ui.info(f"        {line}")
+    return True
+
+
+def cmd_freeze(ui, args):
+    if args.all:
+        games = [g for g in all_games() if g.enabled]
+    elif args.games:
+        games = [find_game(q) for q in args.games]
+    else:
+        raise AdminError("name one or more games, or use --all")
+    for g in games:
+        if g.frozen and not args.all and not ui.confirm(
+                f"{g.name} is already frozen. Replace its lock with what's installed now?",
+                default=True):
+            continue
+        do_freeze(ui, g)
+
+
+def cmd_unfreeze(ui, args):
+    g = find_game(args.game)
+    if not g.frozen:
+        ui.info(f"{g.name} isn't frozen.")
+        return
+    ui.info(g.lock.read_text())
+    if ui.confirm(f"Delete this lock file? {g.name} will then get unpinned versions "
+                  "whenever its venv is rebuilt.", destructive=True):
+        g.lock.unlink()
+        ui.info(f"{g.name} is no longer frozen.")
+
+
+def set_display_name(ui, game, display):
+    with es_paused(ui, "Changing the display name"):
+        tree = gamelist_load()
+        entry = gamelist_entry(tree, game.dirname)
+        if entry is None:
+            entry = ET.SubElement(tree.getroot(), "game")
+            ET.SubElement(entry, "path").text = f"./{game.dirname}"
+        name_el = entry.find("name")
+        if name_el is None:
+            name_el = ET.SubElement(entry, "name")
+        name_el.text = display
+        gamelist_save(tree)
+    ui.info(f"{game.name} now shows as '{display}'.")
+
+
+def cmd_display_name(ui, args):
+    g = find_game(args.game)
+    display = args.display or ui.ask("New display name")
+    if not display:
+        raise AdminError("display name can't be empty")
+    set_display_name(ui, g, display)
+
+
+def cmd_rename(ui, args):
+    g = find_game(args.game)
+    new = validate_name(args.new_name or ui.ask(f"New folder name for {g.name}"))
+    new_path = g.path.parent / f"{new}.git"
+    new_game = Game(new, new_path, g.enabled)
+
+    # The venv hard-codes its path, so it has to be rebuilt. Pin it first so the
+    # rebuild reproduces exactly what's installed now.
+    tmp_lock = None
+    if g.frozen:
+        lock = new_game.lock
+    else:
+        tmp_lock = STUFF / f".rename-{g.dirname}.txt"
+        lock = tmp_lock if write_lock(g, tmp_lock) else None
+
+    with es_paused(ui, "Renaming"):
+        g.path.rename(new_path)
+        if g.frozen:
+            g.lock.rename(new_game.lock)
+        tree = gamelist_load()
+        entry = gamelist_entry(tree, g.dirname)
+        if entry is not None:
+            entry.find("path").text = f"./{new_game.dirname}"
+            name_el = entry.find("name")
+            if name_el is not None and name_el.text == g.name:
+                name_el.text = new
+            gamelist_save(tree)
+    ui.info(f"Renamed {g.name} -> {new}. Rebuilding its venv for the new path...")
+    try:
+        rebuild_venv(new_game, lock)
+    finally:
+        if tmp_lock:
+            tmp_lock.unlink(missing_ok=True)
+    ui.info(f"Done. {new} is ready.")
+
+
+def move_game(ui, g, enable):
+    dest_dir = ROMS if enable else DISABLED
+    if g.enabled == enable:
+        ui.info(f"{g.name} is already {'enabled' if enable else 'disabled'}.")
+        return
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    if (dest_dir / g.dirname).exists():
+        raise AdminError(f"{dest_dir / g.dirname} already exists")
+    g.path.rename(dest_dir / g.dirname)
+    ui.info(f"{g.name} {'enabled' if enable else 'disabled (kept in ' + str(DISABLED) + ')'}.")
+    offer_es_restart(ui)
+
+
+def cmd_disable(ui, args):
+    move_game(ui, find_game(args.game), enable=False)
+
+
+def cmd_enable(ui, args):
+    move_game(ui, find_game(args.game), enable=True)
+
+
+def cmd_remove(ui, args):
+    g = find_game(args.game)
+    ui.info(f"This permanently deletes {g.path}"
+            + (f" and {g.lock}" if g.frozen else "") + ".")
+    if ui.assume_yes:
+        pass
+    elif not ui.interactive:
+        raise AdminError("remove needs confirmation; rerun with --yes")
+    elif ui.ask(f"Type the game name ({g.name}) to confirm") != g.name:
+        ui.info("Not removed.")
+        return
+
+    alias = g.ssh_alias
+    shutil.rmtree(g.path)
+    g.lock.unlink(missing_ok=True)
+    ui.info(f"Deleted {g.name}.")
+
+    if alias and alias.startswith("github-") and not any(o.ssh_alias == alias for o in all_games()):
+        keyfile = ssh_identity(alias)
+        ssh_remove_alias(alias)
+        ui.info(f"Removed Host {alias} from {SSH_CONFIG}.")
+        if keyfile and keyfile.exists():
+            SSH_DEAD.mkdir(mode=0o700, exist_ok=True)
+            for f in (keyfile, Path(f"{keyfile}.pub")):
+                if f.exists():
+                    shutil.move(str(f), SSH_DEAD / f.name)
+            ui.info(f"Moved its key to {SSH_DEAD}. The student can delete the deploy key on GitHub.")
+
+    try:
+        with es_paused(ui, "Removing the game from the menu"):
+            tree = gamelist_load()
+            entry = gamelist_entry(tree, g.dirname)
+            if entry is not None:
+                tree.getroot().remove(entry)
+                gamelist_save(tree)
+    except Declined:
+        ui.info("Left gamelist.xml alone (a stale entry is harmless). "
+                "The menu updates when EmulationStation next restarts.")
+
+
+def cmd_restart_es(ui, args=None):
+    restart_es(ui)
+
+
+def cmd_stop_es(ui, args=None):
+    if es_pid() is None:
+        ui.info("EmulationStation isn't running.")
+        return
+    stop_es()
+    ui.info("EmulationStation stopped.")
+
+
+def cmd_start_es(ui, args=None):
+    if es_pid() is not None:
+        ui.info("EmulationStation is already running.")
+        return
+    start_es(ui)
+
+
+# ---------------------------------------------------------------------------
+# Interactive menu
+# ---------------------------------------------------------------------------
+
+def game_menu(ui, g):
+    while True:
+        g = find_game(g.name)   # refresh state after each action
+        state = "enabled" if g.enabled else "DISABLED"
+        frozen = "frozen" if g.frozen else "not frozen"
+        actions = [
+            ("launch", "Test-launch on the arcade screen"),
+            ("freeze", "Freeze (or re-freeze) its current packages"),
+            ("unfreeze", "Delete its lock file"),
+            ("display", "Set the display name in the menu"),
+            ("rename", "Rename its folder"),
+            ("enable" if not g.enabled else "disable",
+             "Show it in the menu again" if not g.enabled else "Hide it from the menu (keeps files)"),
+            ("remove", "Delete it from the box"),
+        ]
+        choice = ui.choose(f"{g.name}  ({state}, {frozen}, {g.transport})", actions)
+        if choice is None:
+            return
+        ns = argparse.Namespace(game=g.name, games=[g.name], all=False,
+                                display=None, new_name=None)
+        handler = {
+            "launch": cmd_launch, "freeze": cmd_freeze, "unfreeze": cmd_unfreeze,
+            "display": cmd_display_name, "rename": cmd_rename, "enable": cmd_enable,
+            "disable": cmd_disable, "remove": cmd_remove,
+        }[choice]
+        if not guarded(ui, handler, ns):
+            continue
+        ui.pause()
+        if choice == "remove" and not g.path.exists():
+            return
+        if choice == "rename":
+            return
+
+
+def guarded(ui, fn, args):
+    """Run a command, reporting errors instead of exiting. Returns False if declined/failed."""
+    try:
+        fn(ui, args)
+        return True
+    except Declined:
+        ui.info("Cancelled.")
+    except AdminError as e:
+        ui.info(f"\nERROR: {e}")
+    ui.pause()
+    return False
+
+
+def menu(ui):
+    while True:
+        choice = ui.choose("Arcade box game manager", [
+            ("list", "List all games"),
+            ("manage", "Manage a game (launch, freeze, rename, disable, remove...)"),
+            ("add", "Add a new game from GitHub"),
+            ("freeze-all", "Freeze every enabled game"),
+            ("restart-es", "Restart EmulationStation"),
+            ("quit", "Exit"),
+        ])
+        if choice in (None, "quit"):
+            return
+        if choice == "list":
+            cmd_list(ui)
+            ui.pause()
+        elif choice == "manage":
+            games = all_games()
+            gl = gamelist_info()
+            tag = ui.choose("Which game?", [
+                (g.name, ("[disabled] " if not g.enabled else "")
+                 + (gl.get(g.dirname, ("",))[0] or "")
+                 + ("  (frozen)" if g.frozen else "")) for g in games])
+            if tag:
+                game_menu(ui, find_game(tag))
+        elif choice == "add":
+            ns = argparse.Namespace(url=None, name=None, display=None, key_id=None, no_launch=False)
+            if guarded(ui, cmd_add, ns):
+                ui.pause()
+        elif choice == "freeze-all":
+            if guarded(ui, cmd_freeze, argparse.Namespace(all=True, games=[])):
+                ui.pause()
+        elif choice == "restart-es":
+            if guarded(ui, cmd_restart_es, None):
+                ui.pause()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="arcade-admin",
+        description="Manage student games on the arcade box. Run with no command for a menu.")
+    p.add_argument("-y", "--yes", action="store_true", help="answer yes to every confirmation")
+    sub = p.add_subparsers(dest="cmd")
+
+    sub.add_parser("list", help="list games").set_defaults(fn=cmd_list)
+
+    a = sub.add_parser("add", help="add a game from GitHub")
+    a.add_argument("url", nargs="?", help="https://github.com/OWNER/REPO, git@github.com:OWNER/REPO or OWNER/REPO")
+    a.add_argument("--name", help="folder name (letters, digits, - and _)")
+    a.add_argument("--display", help="display name in the menu")
+    a.add_argument("--key-id", help="deploy-key id for private repos (default: owner)")
+    a.add_argument("--no-launch", action="store_true", help="skip the test launch")
+    a.set_defaults(fn=cmd_add)
+
+    f = sub.add_parser("freeze", help="pin a game's currently installed packages")
+    f.add_argument("games", nargs="*")
+    f.add_argument("--all", action="store_true", help="every enabled game")
+    f.set_defaults(fn=cmd_freeze)
+
+    for name, fn, hlp in (("unfreeze", cmd_unfreeze, "delete a game's lock file"),
+                          ("launch", cmd_launch, "test-launch a game on the arcade screen"),
+                          ("disable", cmd_disable, "hide a game from the menu (keeps files)"),
+                          ("enable", cmd_enable, "show a disabled game again"),
+                          ("remove", cmd_remove, "delete a game from the box")):
+        s = sub.add_parser(name, help=hlp)
+        s.add_argument("game")
+        s.set_defaults(fn=fn)
+
+    d = sub.add_parser("display-name", help="set the name shown in the menu")
+    d.add_argument("game")
+    d.add_argument("display", nargs="?")
+    d.set_defaults(fn=cmd_display_name)
+
+    r = sub.add_parser("rename", help="rename a game's folder")
+    r.add_argument("game")
+    r.add_argument("new_name", nargs="?")
+    r.set_defaults(fn=cmd_rename)
+
+    sub.add_parser("restart-es", help="restart EmulationStation").set_defaults(fn=cmd_restart_es)
+    sub.add_parser("stop-es", help="close EmulationStation").set_defaults(fn=cmd_stop_es)
+    sub.add_parser("start-es", help="start EmulationStation on the arcade screen").set_defaults(fn=cmd_start_es)
+    return p
+
+
+def main():
+    args = build_parser().parse_args()
+    if not ROMS.is_dir():
+        sys.exit(f"arcade-admin: {ROMS} not found -- run this on the arcade box as the es user")
+    try:
+        if args.cmd is None:
+            if not sys.stdin.isatty():
+                sys.exit("arcade-admin: the menu needs a terminal (use `ssh -t arcade arcade-admin`)")
+            ui = DialogUI(args.yes) if shutil.which("dialog") else UI(args.yes)
+            menu(ui)
+            ui.clear()
+        else:
+            args.fn(UI(args.yes), args)
+    except Declined:
+        print("Cancelled.")
+        sys.exit(1)
+    except AdminError as e:
+        sys.exit(f"arcade-admin: {e}")
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
