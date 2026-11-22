@@ -1,0 +1,7 @@
+__pycache__/
+venv/
+
+# LaTeX build output
+docs/*.aux
+docs/*.log
+docs/*.synctex.gz
