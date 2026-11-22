@@ -1,0 +1,9 @@
+<!-- The student-games system. Merged into /etc/emulationstation/es_systems.cfg by setup-box.sh. -->
+<system>
+  <name>112</name>
+  <fullname>Python Testing</fullname>
+  <path>/home/es/RetroPie/roms/cmu_graphics</path>
+  <extension>.git</extension>
+  <command>/home/es/stuff/112.sh %ROM%</command>
+  <theme>112</theme>
+</system>

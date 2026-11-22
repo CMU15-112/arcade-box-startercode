@@ -1,0 +1,28 @@
+# apt packages setup-box.sh makes sure are installed (EmulationStation's own
+# build dependencies are installed by RetroPie-Setup).
+
+# remote access and repos
+openssh-server
+git
+curl
+
+# building game venvs (pycairo builds from source and needs the cairo headers)
+python3-venv
+python3-dev
+python3-pip
+pkg-config
+libcairo2-dev
+
+# the kiosk session: openbox runs ES in a maximized gnome-terminal; xrandr sets 800x600
+openbox
+gnome-terminal
+x11-xserver-utils
+
+# arcade-admin menus, XML tooling, remote screenshots (`import -window root`)
+dialog
+xmlstarlet
+imagemagick
+
+# fonts some games use (e.g. Arabic text)
+fonts-noto-core
+fonts-noto-extra

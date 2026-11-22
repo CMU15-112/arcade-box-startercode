@@ -1,0 +1,2 @@
+# Passwordless sudo for the arcade user (arcade-admin and 112.sh rely on it).
+es ALL=(ALL) NOPASSWD:ALL

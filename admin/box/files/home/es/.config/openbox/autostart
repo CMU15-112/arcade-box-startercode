@@ -1,0 +1,3 @@
+xrandr -s 800x600
+#unclutter -idle 5 -root &
+gnome-terminal --maximize -- emulationstation
