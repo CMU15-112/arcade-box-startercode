@@ -22,7 +22,7 @@ ssh arcade arcade-admin list        # or run a single command
 | `rename GAME NEWNAME` | Renames the folder, carries over the lock file and play count, and rebuilds the venv. |
 | `disable GAME` / `enable GAME` | Hides a game from the menu, or shows it again. The files are kept in `~/RetroPie/roms/cmu_graphics-disabled/`. |
 | `remove GAME` | Deletes the game and its lock file, and archives its deploy key to `~/.ssh/dead/` if no other game uses it. |
-| `restart-es` | Restarts EmulationStation so its menu picks up changes. |
+| `restart-es [--force]` | Restarts EmulationStation so its menu picks up changes. If a game is running, it refuses unless you pass `--force` (`-f`). `--force` kills the game (its `112.sh` launcher and everything it started) first, which is useful when a game has hung and has no working quit button. It also brings ES back if ES isn't running. |
 
 `GAME` can be any unique prefix of the folder name, and matching ignores case.
 
@@ -33,7 +33,9 @@ A few things to know about how the tool behaves:
 - **Backups.** Before any write, `~/.ssh/config` and `gamelist.xml` are backed up next to the original as `*.bak-<timestamp>`.
 - **SSH only.** The tool isn't reachable from the EmulationStation menu.
 
-There are also `stop-es` and `start-es` commands, which `install.sh` uses.
+There are also `stop-es [--force]` and `start-es` commands. `install.sh` uses them.
+
+A hung game can now be cleared over SSH with `arcade-admin restart-es --force`, so you don't need the hard-reset button. In the menu, choosing "Restart EmulationStation" while a game is running asks whether to kill the game.
 
 ## Box configuration and `install.sh`
 

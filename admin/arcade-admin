@@ -311,17 +311,74 @@ def es_pid():
     return pids[0] if pids else None
 
 
-def game_running():
+def launcher_pids():
+    """Processes actually executing 112.sh (`[bash] /home/es/stuff/112.sh GAME`), not
+    shells that merely mention it in a longer command line."""
     launcher = str(LAUNCHER).encode()
-    return bool(_pids_where(lambda d: launcher in (d / "cmdline").read_bytes()))
+
+    def is_launcher(d):
+        argv = (d / "cmdline").read_bytes().split(b"\0")
+        return launcher in argv[:2]
+    return _pids_where(is_launcher)
 
 
-def stop_es():
+def _ancestors():
+    pids, pid = set(), os.getpid()
+    while pid and pid not in pids:
+        pids.add(pid)
+        pid = _ppid(pid)
+    return pids
+
+
+def game_running():
+    return bool(launcher_pids())
+
+
+def _ppid(pid):
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return int(stat.rsplit(")", 1)[1].split()[1])   # field after "(comm)" state
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def kill_games(ui):
+    """Kill every running 112.sh launcher and everything it started (the game)."""
+    protected = _ancestors()   # never kill the shell/ssh session running this tool
+    roots = set(launcher_pids()) - protected
+    if not roots:
+        return
+    targets = set(roots)
+    children = {}
+    for d in Path("/proc").iterdir():
+        if d.name.isdigit():
+            children.setdefault(_ppid(int(d.name)), []).append(int(d.name))
+    stack = list(roots)
+    while stack:
+        for c in children.get(stack.pop(), []):
+            if c not in targets and c not in protected:
+                targets.add(c)
+                stack.append(c)
+    ui.info(f"Force-quitting the running game ({len(targets)} process(es))...")
+    for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 2)):
+        for pid in targets:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, sig)
+        for _ in range(wait * 4):
+            if not any(Path(f"/proc/{p}").exists() for p in targets):
+                return
+            time.sleep(0.25)
+
+
+def stop_es(force=False, ui=None):
+    if game_running():
+        if not force:
+            raise AdminError("a game is running on the arcade box right now; quit it first, "
+                             "or use --force to kill it")
+        kill_games(ui or UI())
     pid = es_pid()
     if pid is None:
         return
-    if game_running():
-        raise AdminError("a game is running on the arcade box right now; quit it first")
     ES_RESTART_FLAG.unlink(missing_ok=True)   # make the wrapper exit instead of relaunching
     os.kill(pid, signal.SIGTERM)
     for _ in range(30):
@@ -350,12 +407,13 @@ def start_es(ui):
         run(["sudo", "reboot"], check=False)
 
 
-def restart_es(ui):
+def restart_es(ui, force=False):
     if es_pid() is None:
+        stop_es(force, ui)   # still clears out a hung game when forced
         ui.info("EmulationStation isn't running; starting it.")
     else:
         ui.info("Restarting EmulationStation...")
-        stop_es()
+        stop_es(force, ui)
     start_es(ui)
 
 
@@ -844,14 +902,17 @@ def cmd_remove(ui, args):
 
 
 def cmd_restart_es(ui, args=None):
-    restart_es(ui)
+    restart_es(ui, force=getattr(args, "force", False))
 
 
 def cmd_stop_es(ui, args=None):
+    force = getattr(args, "force", False)
     if es_pid() is None:
+        if force and game_running():
+            kill_games(ui)
         ui.info("EmulationStation isn't running.")
         return
-    stop_es()
+    stop_es(force, ui)
     ui.info("EmulationStation stopped.")
 
 
@@ -945,7 +1006,13 @@ def menu(ui):
             if guarded(ui, cmd_freeze, argparse.Namespace(all=True, games=[])):
                 ui.pause()
         elif choice == "restart-es":
-            if guarded(ui, cmd_restart_es, None):
+            force = False
+            if game_running():
+                force = ui.confirm("A game is running on the arcade box. Kill it and restart "
+                                   "EmulationStation anyway?")
+                if not force:
+                    continue
+            if guarded(ui, cmd_restart_es, argparse.Namespace(force=force)):
                 ui.pause()
 
 
@@ -994,8 +1061,12 @@ def build_parser():
     r.add_argument("new_name", nargs="?")
     r.set_defaults(fn=cmd_rename)
 
-    sub.add_parser("restart-es", help="restart EmulationStation").set_defaults(fn=cmd_restart_es)
-    sub.add_parser("stop-es", help="close EmulationStation").set_defaults(fn=cmd_stop_es)
+    for name, fn, hlp in (("restart-es", cmd_restart_es, "restart EmulationStation"),
+                          ("stop-es", cmd_stop_es, "close EmulationStation")):
+        s = sub.add_parser(name, help=hlp)
+        s.add_argument("-f", "--force", action="store_true",
+                       help="kill a running game first instead of refusing")
+        s.set_defaults(fn=fn)
     sub.add_parser("start-es", help="start EmulationStation on the arcade screen").set_defaults(fn=cmd_start_es)
     return p
 
