@@ -13,11 +13,13 @@ ssh arcade arcade-admin list        # or run a single command
 
 | Command | What it does |
 |---|---|
-| `list` | Lists every game with its display name, enabled/disabled state, repo access (`https`, `alias:github-<id>`, or `ssh-default`), branch, frozen status, venv status, and play count. |
-| `add URL [--name N] [--display "Pretty"] [--key-id ID] [--no-launch]` | Adds a game. See [Adding a game](#adding-a-game). |
+| `list` | Lists every game with its display name, semester, enabled/disabled state, repo access (`https`, `alias:github-<id>`, or `ssh-default`), branch, frozen status, venv status, and play count. |
+| `add URL [--name N] [--semester S] [--display "Pretty"] [--key-id ID] [--no-launch]` | Adds a game. See [Adding a game](#adding-a-game). |
+| `semester GAME [S]` | Sets the semester the game is listed under, such as `"Fall 2026"`, `F26`, `S27` or `M27` (summer). See [Semesters](#semesters). |
+| `sync-menu [--check]` | Rebuilds the per-semester menu entries from the games' tags. The other commands do this on their own; `install.sh` runs it too. |
 | `launch GAME` | Test-launches the game on the arcade screen, the same way EmulationStation does. ES is closed during the launch and restarted afterwards. |
-| `freeze GAME...` / `freeze --all` | Pins the game's currently installed packages. See [Frozen dependencies](#frozen-dependencies). |
-| `unfreeze GAME` | Deletes the game's lock file. |
+| `freeze GAME...` / `freeze --all` | Pins the game's currently installed packages and its code: a frozen game no longer pulls from GitHub. See [Frozen dependencies](#frozen-dependencies). |
+| `unfreeze GAME` | Deletes the game's lock file, so it pulls on every launch again. |
 | `display-name GAME "Name"` | Sets the name shown in the menu without renaming the folder. |
 | `rename GAME NEWNAME` | Renames the folder, carries over the lock file and play count, and rebuilds the venv. |
 | `disable GAME` / `enable GAME` | Hides a game from the menu, or shows it again. The files are kept in `~/RetroPie/roms/cmu_graphics-disabled/`. |
@@ -29,8 +31,8 @@ ssh arcade arcade-admin list        # or run a single command
 A few things to know about how the tool behaves:
 
 - **Confirmations.** Destructive steps ask before they act. `--yes` (`-y`) answers yes to every question, for scripting. `remove` asks you to type the game's name.
-- **The arcade screen.** Some commands briefly close EmulationStation on the arcade screen: anything that edits `gamelist.xml` (display names, renames, removals) and test launches. The tool asks first, refuses while a game is being played, and relaunches ES afterwards. Commands that change which games exist offer to restart ES at the end.
-- **Backups.** Before any write, `~/.ssh/config` and `gamelist.xml` are backed up next to the original as `*.bak-<timestamp>`.
+- **The arcade screen.** Some commands briefly close EmulationStation on the arcade screen: anything that changes the menu (adding, removing, renaming, enabling or disabling a game, or changing its semester or display name) and test launches. The tool asks first, refuses while a game is being played, and relaunches ES afterwards.
+- **Backups.** Before any write, `~/.ssh/config`, `es_systems.cfg` and `gamelist.xml` are backed up next to the original as `*.bak-<timestamp>`.
 - **SSH only.** The tool isn't reachable from the EmulationStation menu.
 
 There are also `stop-es [--force]` and `start-es` commands. `install.sh` uses them.
@@ -76,7 +78,7 @@ The script copies `admin/` to `~/stuff/arcade-setup/` on the box and runs [`box/
 | EmulationStation | `setup-box.sh` | If ES isn't installed, clones RetroPie-Setup and builds EmulationStation and the carbon-2021 theme from source. This takes a while. |
 | Launcher and tools | [`112.sh`](../admin/112.sh), [`arcade-admin`](../admin/arcade-admin), [`arcade-button`](../admin/arcade-button) | Installs all three into `~/stuff/` and links `/usr/local/bin/arcade-admin`. |
 | Config files | [`box/files/`](../admin/box/files/) | Installs each file at the same path on the box. See the list below this table. ES is closed while its own config files are replaced. |
-| `112` system | [`box/es_system_112.xml`](../admin/box/es_system_112.xml) | Inserts or replaces just that entry in `/etc/emulationstation/es_systems.cfg`. The rest of the file is left alone. |
+| Semester menu entries | `arcade-admin sync-menu` | Makes the student-game systems at the top of `/etc/emulationstation/es_systems.cfg` match the games' semesters. The rest of the file is left alone. See [Semesters](#semesters). |
 | Auto-login | [`box/merge-config.py`](../admin/box/merge-config.py) | Sets `AutomaticLogin=es` in `/etc/gdm3/custom.conf`, and sets `es`'s session to openbox through AccountsService. |
 | Reset button | `setup-box.sh` | Enables and starts `arcade-button.service`, and restarts it when the script or the unit changes. |
 
@@ -98,12 +100,12 @@ These are the files under `box/files/`:
 2. On the box, run `sudo apt install openssh-server`.
 3. On your machine, point the `arcade` SSH host at the box and set up key login.
 4. Run `admin/install.sh`. It asks for `es`'s sudo password once, builds EmulationStation, and applies everything above.
-5. Reboot. The box should come up in EmulationStation with an empty `112` system.
+5. Reboot. The box should come up in EmulationStation. There are no student-game entries until a game is added.
 6. Re-add the games with `arcade-admin add`.
 
 **What isn't restored:**
 
-- **The games and their deploy keys.** Lock files, display names, and the private keys in `~/.ssh` all live only on the box. A rebuild means re-adding each game, and private repos need their owners to add a new deploy key. If you want to avoid that, back up `~/.ssh` and `~/stuff/frozen/` somewhere private before you wipe the box.
+- **The games and their deploy keys.** Lock files, display names, semesters, and the private keys in `~/.ssh` all live only on the box. A rebuild means re-adding each game, and private repos need their owners to add a new deploy key. If you want to avoid that, back up `~/.ssh` and `~/stuff/frozen/` somewhere private before you wipe the box.
 - **RetroArch and the libretro cores.** The old install had about 20, but none of them had any ROMs.
 - **The Raspberry Pi Pico's build tooling.** This is `~/src/pico-sdk`, `~/src/picotool`, `~/reset_pico.py`, and `/etc/udev/rules.d/99-picotool.rules`. The button firmware itself lives on the Pico and is version-controlled in `admin/pico/`; reinstalling the box doesn't touch it.
 - **Network settings,** such as Wi-Fi.
@@ -126,7 +128,7 @@ Ask for the GitHub URL and confirm the repo has the following. `add` checks for 
 ssh -t arcade arcade-admin add https://github.com/owner/repo --name Cool-Game
 ```
 
-Leave out the URL and options to be prompted for them. Folder names may only use letters, digits, `-` and `_`, because `112.sh` runs `cd $1` without quotes.
+Leave out the URL and options to be prompted for them. Folder names may only use letters, digits, `-` and `_`, because `112.sh` runs `cd $1` without quotes. The semester defaults to the current one, based on today's date: August to December is Fall, January to May is Spring, and June and July are Summer.
 
 - **Public repos** are cloned over HTTPS, with no key needed.
 - **Private repos** get their own deploy key. The tool does the following:
@@ -136,15 +138,41 @@ Leave out the URL and options to be prompted for them. Folder names may only use
 
   If you'd rather not wait, press `q` (or run non-interactively, which exits with code 3). Running the same `add` command later reuses the key. GitHub allows each deploy key on only one repo, so a key id that another game already uses is refused.
 
-After cloning, `add` builds the venv and offers a test launch on the arcade screen. Press P1 to quit the game. If the game works, `add` freezes its dependencies, then asks for an optional display name, and finally offers to restart ES so the game appears in the menu.
+After cloning, `add` builds the venv and offers a test launch on the arcade screen. Press P1 to quit the game. If the game works, `add` offers to freeze it (which also stops it pulling updates), then asks for an optional display name, and finally restarts ES so the game appears in the menu under its semester.
+
+## Semesters
+
+Every game is tagged with the semester it's from. The main screen of the box has one entry per semester, newest first, and each entry lists that semester's enabled games. Games without a tag are listed under **Other**, at the end.
+
+```bash
+arcade-admin semester Cool-Game "Spring 2027"     # or S27; M27 is Summer 2027
+```
+
+The tag is stored in the game's own `.git/config` (`git config arcade.semester`), so it moves with the folder when the game is renamed, disabled or enabled. It never changes the working tree, and students can't change it.
+
+ES can only list a folder of games, so `arcade-admin` builds the menu from the tags:
+
+- `~/RetroPie/roms/cmu_graphics-semesters/<semester>/<Name>.git` is a symlink to each enabled game in `~/RetroPie/roms/cmu_graphics/`. The games themselves don't move, so their venvs keep working.
+- `/etc/emulationstation/es_systems.cfg` gets one `<system>` per semester, at the top of the file, newest first. `arcade-admin` treats every system whose command is `/home/es/stuff/112.sh %ROM%` as one of its own, and replaces those systems whenever it rebuilds the menu.
+- A game's display name and play count live in its semester's gamelist, `gamelists/<semester>/gamelist.xml`. When a game changes semester, its entry moves with it.
+
+Every command that changes a game rebuilds the menu on its own. If you edit things by hand, run `arcade-admin sync-menu` afterwards.
 
 ## Updating a game
 
-Usually you don't need to do anything. Every launch runs `git pull`, so students only have to push.
+An unfrozen game runs `git pull` on every launch, so its students only have to push. A **frozen** game (one with a lock file) skips the pull and keeps running the code it had when it was frozen. To bring in a student's new code for a frozen game:
+
+```bash
+git -C ~/RetroPie/roms/cmu_graphics/Cool-Game.git pull
+arcade-admin launch Cool-Game                           # make sure it still works
+arcade-admin freeze Cool-Game                           # re-freeze if requirements.txt changed
+```
+
+Or run `arcade-admin unfreeze Cool-Game` to go back to pulling on every launch.
 
 You only need to step in when one of these happens:
 
-- **The pull fails.** The usual causes are that the deploy key was removed or the repo was renamed or deleted. The game still launches, but it runs the last code it pulled. Use `ssh -T git@github-<id>` to diagnose, or run the [health check](#health-check).
+- **The pull fails** (unfrozen games only). The usual causes are that the deploy key was removed or the repo was renamed or deleted. The game still launches, but it runs the last code it pulled. Use `ssh -T git@github-<id>` to diagnose, or run the [health check](#health-check).
 - **The pull refuses to run because of local changes.** Run `git -C <Game>.git status` to see them, then `git checkout -- .` or `git reset --hard origin/<branch>` to discard them.
 - **The student force-pushed or rewrote history.** Run `git fetch && git reset --hard origin/<branch>`.
 - **The dependencies are stuck or broken.** Run `rm -rf <Game>.git/retropie-venv`. The next launch rebuilds it with the frozen versions.
@@ -160,6 +188,7 @@ The installed games currently use cmu-graphics versions from 1.1.23 to 1.1.44, e
 The lock files in `~/stuff/frozen/<Name>.git.txt` close this gap. Each one is the output of `pip freeze` from a venv that's known to work.
 
 - Each lock file sits outside the repo, so `git pull` never conflicts with it, and students can't change it.
+- A lock file also freezes the code: `112.sh` skips `git pull` for a game that has one, so a student push can't break a working game. See [Updating a game](#updating-a-game).
 - On every launch, `112.sh` runs `pip install -r <lock>`. That's a fast no-op if the venv already matches, and if the venv is missing or damaged, the same command reinstalls the exact versions. The launcher then installs `requirements.txt` with `-c <lock>`, so the lock file acts as a constraint.
 - It also covers packages that were installed in the venv by hand, outside `requirements.txt`. For example, Professor-Invaders has no `requirements.txt`, so it depends entirely on its lock file.
 
@@ -178,22 +207,24 @@ The box runs Ubuntu 22.04 (Python 3.10) with RetroPie/EmulationStation. Everythi
 
 At boot, GDM logs `es` in automatically and runs `~/.config/openbox/autostart`. That script sets the resolution to 800x600 and starts `emulationstation` in a maximized `gnome-terminal`. The `emulationstation` wrapper relaunches ES if `/tmp/es-restart` exists when ES exits; otherwise the terminal closes. `arcade-admin` restarts ES by stopping the real binary (`/opt/retropie/supplementary/emulationstation/emulationstation`) and starting a new terminal on display `:0`.
 
-EmulationStation reads its systems from `/etc/emulationstation/es_systems.cfg`. The first entry is the one for student games:
+EmulationStation reads its systems from `/etc/emulationstation/es_systems.cfg`. The first entries are the student games, one per semester (see [Semesters](#semesters)):
 
 ```xml
 <system>
-  <name>112</name>
-  <fullname>Python Testing</fullname>
-  <path>/home/es/RetroPie/roms/cmu_graphics</path>
+  <name>Fall 2026</name>
+  <fullname>15-112 Fall 2026</fullname>
+  <path>/home/es/RetroPie/roms/cmu_graphics-semesters/fall-2026</path>
   <extension>.git</extension>
   <command>/home/es/stuff/112.sh %ROM%</command>
   <theme>112</theme>
 </system>
 ```
 
-**Every directory in `~/RetroPie/roms/cmu_graphics/` whose name ends in `.git` is a game.** The menu shows the directory name without `.git`, unless gamelist.xml gives it a display name. When someone picks a game, EmulationStation runs [`112.sh`](../admin/112.sh) with the game's full path. The script:
+The carbon-2021 theme has no `112` artwork, so the main screen shows each system's `<name>` as text.
 
-1. `cd`s into the game directory and runs `git pull`. It first sets `core.fsync` so a hard reset is less likely to corrupt the repo.
+**Every directory in `~/RetroPie/roms/cmu_graphics/` whose name ends in `.git` is a game.** The menu shows the directory name without `.git`, unless gamelist.xml gives it a display name. When someone picks a game, EmulationStation runs [`112.sh`](../admin/112.sh) with the path of the game's symlink in its semester folder. The script:
+
+1. `cd`s into the game directory and, unless the game is frozen (has a lock file), runs `git pull`. It first sets `core.fsync` so a hard reset is less likely to corrupt the repo.
 2. Creates `retropie-venv/` inside the game directory if it doesn't exist yet, then activates it.
 3. Installs the lock file if the game has one, then `requirements.txt`, using the lock file as a constraint if there is one.
 4. Sets `CI=False` and runs `python3 main.py`.
@@ -209,13 +240,15 @@ Two details shape how `arcade-admin` works:
 |---|---|---|
 | `/home/es/RetroPie/roms/cmu_graphics/` | One `<Name>.git` clone per game | **Yes** |
 | `/home/es/RetroPie/roms/cmu_graphics-disabled/` | Disabled games. ES doesn't scan it. | **Yes** |
+| `/home/es/RetroPie/roms/cmu_graphics-semesters/<semester>/` | Symlinks to the enabled games, one folder per semester. ES scans these. Rebuilt by `arcade-admin`. | **Yes** |
 | `/home/es/stuff/112.sh` | The launcher. Source: [`admin/112.sh`](../admin/112.sh). `112.sh.bak-2026-11-22` is the version from before freezing was added. | **Yes** |
 | `/home/es/stuff/arcade-admin` (+ `/usr/local/bin/arcade-admin` symlink) | The management tool. Source: [`admin/arcade-admin`](../admin/arcade-admin). | Tool |
 | `/home/es/stuff/arcade-button`, `/etc/systemd/system/arcade-button.service` | The reset-button listener. Source: [`admin/arcade-button`](../admin/arcade-button). | **Yes** |
 | `/home/es/stuff/frozen/<Name>.git.txt` | The lock file for each game | **Yes** |
-| `/etc/emulationstation/es_systems.cfg` | Defines the `112` system (shown above) | **Yes** |
+| `/etc/emulationstation/es_systems.cfg` | Defines one system per semester (shown above) | **Yes** |
 | `/home/es/.ssh/config`, `/home/es/.ssh/id_rsa.*`, `id_ed25519.*` | One `Host github-<id>` alias plus one deploy key per private repo. The default `id_rsa` is the deploy key for `rriley/arcade-box-test`. | **Yes** |
-| `/opt/retropie/configs/all/emulationstation/gamelists/112/gamelist.xml` | Display names, play counts, and favorites | Yes |
+| `/opt/retropie/configs/all/emulationstation/gamelists/<semester>/gamelist.xml` | Display names, play counts, and favorites | Yes |
+| `/opt/retropie/configs/all/emulationstation/gamelists/112/` | Gamelist from before semesters. `arcade-admin` moved its entries into the semester gamelists. | No, legacy |
 | `/opt/retropie/configs/all/emulationstation/gamelists/112graphics/` | Gamelist from the 2023 prototype system | No, legacy |
 | `/opt/retropie/configs/112/emulators.cfg` | `runcommand` emulator config. It isn't used, because the system entry calls `112.sh` directly. | No |
 | `/home/es/stuff/es_systems.cfg`, `/home/es/stuff/emulators.cfg` | Original copies from the `pi`-user era (paths point to `/home/pi`) | No, reference only |
@@ -227,6 +260,8 @@ Two details shape how `arcade-admin` works:
 If `arcade-admin` isn't available, these are the steps it automates.
 
 **Add a public repo:** `git clone https://github.com/<owner>/<repo> ~/RetroPie/roms/cmu_graphics/Cool-Game.git`
+
+**Set its semester:** `git -C ~/RetroPie/roms/cmu_graphics/Cool-Game.git config arcade.semester "Fall 2026"`. Then add the semester's `<system>` to `es_systems.cfg` (as shown above) and symlink the game into its folder.
 
 **Add a private repo:**
 

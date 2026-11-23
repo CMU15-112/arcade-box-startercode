@@ -6,6 +6,7 @@ Run it over SSH on the box (as user `es`):
     arcade-admin                 interactive menu
     arcade-admin list            table of games
     arcade-admin add URL         add a game (public -> HTTPS, private -> deploy key)
+    arcade-admin semester GAME S tag a game with its semester (one menu entry per semester)
     arcade-admin --help          everything else
 
 See docs/ADMIN.md in the arcade-box-starter repo for the full story.
@@ -31,12 +32,18 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 HOME = Path.home()
-ROMS = HOME / "RetroPie/roms/cmu_graphics"                 # scanned by ES
-DISABLED = HOME / "RetroPie/roms/cmu_graphics-disabled"    # not scanned by ES
+ROMS = HOME / "RetroPie/roms/cmu_graphics"                 # where enabled games live
+DISABLED = HOME / "RetroPie/roms/cmu_graphics-disabled"    # where disabled games live
+# ES scans these: one folder per semester, holding symlinks to the enabled games in ROMS.
+SEMESTER_ROMS = HOME / "RetroPie/roms/cmu_graphics-semesters"
 STUFF = HOME / "stuff"
 LAUNCHER = STUFF / "112.sh"
 FROZEN = STUFF / "frozen"
-GAMELIST = Path("/opt/retropie/configs/all/emulationstation/gamelists/112/gamelist.xml")
+ES_SYSTEMS = Path("/etc/emulationstation/es_systems.cfg")
+GAMELISTS = Path("/opt/retropie/configs/all/emulationstation/gamelists")   # <system>/gamelist.xml
+LEGACY_SYSTEM = "112"      # the single system used before semesters; its gamelist is migrated
+OTHER_SYSTEM = "Other"     # menu entry for games without a semester
+GIT_SEMESTER_KEY = "arcade.semester"   # stored in each game's .git/config
 SSH_DIR = HOME / ".ssh"
 SSH_CONFIG = SSH_DIR / "config"
 SSH_DEAD = SSH_DIR / "dead"
@@ -57,6 +64,54 @@ GITHUB_RE = re.compile(
     r"^(?:https?://github\.com/|git@github\.com:|ssh://git@github\.com/)?"
     r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$"
 )
+
+
+TERMS = ("Spring", "Summer", "Fall")   # in calendar order
+TERM_ALIASES = {"spring": 0, "s": 0, "summer": 1, "su": 1, "m": 1, "fall": 2, "f": 2}
+SEMESTER_RE = re.compile(r"^\s*(spring|summer|fall|su|s|m|f)[\s_-]*(\d{4}|\d{2})\s*$", re.I)
+
+
+@dataclass(frozen=True, order=True)
+class Semester:
+    """A semester such as Fall 2026. Sorts chronologically."""
+    year: int
+    term_index: int    # index into TERMS
+
+    @property
+    def term(self):
+        return TERMS[self.term_index]
+
+    def __str__(self):
+        return f"{self.term} {self.year}"
+
+    @property
+    def slug(self):
+        return f"{self.term.lower()}-{self.year}"
+
+    @classmethod
+    def parse(cls, text):
+        """Accepts 'Fall 2026', 'fall-2026', 'F26', 'S27', 'M26' / 'Summer 26', ..."""
+        m = SEMESTER_RE.match(text or "")
+        if not m:
+            raise AdminError(f"'{text}' isn't a semester; use e.g. 'Fall 2026', 'Spring 2027', "
+                             "'Summer 2027' or F26 / S27 / M27")
+        year = int(m.group(2))
+        if year < 100:
+            year += 2000
+        return cls(year, TERM_ALIASES[m.group(1).lower()])
+
+    @classmethod
+    def for_date(cls, day):
+        """August-December is Fall, January-May is Spring, June-July is Summer."""
+        if day.month >= 8:
+            return cls(day.year, 2)
+        if day.month <= 5:
+            return cls(day.year, 0)
+        return cls(day.year, 1)
+
+    @classmethod
+    def current(cls):
+        return cls.for_date(datetime.date.today())
 
 
 class AdminError(Exception):
@@ -240,6 +295,29 @@ class Game:
     def git(self, *args):
         res = run(["git", "-C", self.path, *args], check=False, capture=True)
         return res.stdout.strip() if res.returncode == 0 else ""
+
+    @property
+    def semester(self):
+        raw = self.git("config", "--get", GIT_SEMESTER_KEY)
+        if not raw:
+            return None
+        try:
+            return Semester.parse(raw)
+        except AdminError:
+            return None
+
+    def set_semester(self, sem):
+        run(["git", "-C", self.path, "config", GIT_SEMESTER_KEY, str(sem)], quiet=True)
+
+    @property
+    def system(self):
+        """The ES system (menu entry) this game appears under."""
+        sem = self.semester
+        return str(sem) if sem else OTHER_SYSTEM
+
+    @property
+    def gamelist(self):
+        return GAMELISTS / self.system / "gamelist.xml"
 
     @property
     def remote(self):
@@ -433,22 +511,13 @@ def es_paused(ui, why):
             start_es(ui)
 
 
-def offer_es_restart(ui):
-    if es_pid() is None:
-        return
-    if ui.confirm("Restart EmulationStation now so its menu shows the change?"):
-        restart_es(ui)
-    else:
-        ui.info("The menu updates the next time EmulationStation starts (`arcade-admin restart-es`).")
-
-
 # ---------------------------------------------------------------------------
 # gamelist.xml (only touch while ES is stopped -- it rewrites the file on exit)
 # ---------------------------------------------------------------------------
 
-def gamelist_load():
-    if GAMELIST.exists():
-        return ET.parse(GAMELIST)
+def gamelist_load(path):
+    if path.exists():
+        return ET.parse(path)
     return ET.ElementTree(ET.Element("gameList"))
 
 
@@ -459,25 +528,205 @@ def gamelist_entry(tree, dirname):
     return None
 
 
-def gamelist_save(tree):
+def gamelist_save(tree, path):
     assert es_pid() is None, "gamelist edited while EmulationStation is running"
-    GAMELIST.parent.mkdir(parents=True, exist_ok=True)
-    backup(GAMELIST)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup(path)
     ET.indent(tree, space="\t")
-    GAMELIST.write_text('<?xml version="1.0"?>\n'
-                        + ET.tostring(tree.getroot(), encoding="unicode") + "\n")
+    path.write_text('<?xml version="1.0"?>\n'
+                    + ET.tostring(tree.getroot(), encoding="unicode") + "\n")
+
+
+def our_gamelists():
+    """Gamelists of every system arcade-admin manages (or used to), legacy one first."""
+    names = [LEGACY_SYSTEM] + [s.findtext("name") for s in our_systems(es_systems_load())]
+    names += sorted({g.system for g in all_games()})
+    seen, paths = set(), []
+    for n in names:
+        if n and n not in seen:
+            seen.add(n)
+            paths.append(GAMELISTS / n / "gamelist.xml")
+    return [p for p in paths if p.exists()]
 
 
 def gamelist_info():
     """{dirname: (display name, playcount)} read-only, safe any time."""
     info = {}
-    try:
-        for g in gamelist_load().getroot().findall("game"):
-            p = (g.findtext("path") or "").strip().removeprefix("./")
-            info[p] = (g.findtext("name") or "", g.findtext("playcount") or "0")
-    except ET.ParseError:
-        pass
+    for path in our_gamelists():
+        try:
+            for g in gamelist_load(path).getroot().findall("game"):
+                p = (g.findtext("path") or "").strip().removeprefix("./")
+                info[p] = (g.findtext("name") or "", g.findtext("playcount") or "0")
+        except ET.ParseError:
+            pass
     return info
+
+
+# ---------------------------------------------------------------------------
+# The menu: one ES system per semester (es_systems.cfg + folders of symlinks)
+# ---------------------------------------------------------------------------
+
+def es_systems_load():
+    if ES_SYSTEMS.exists():
+        return ET.parse(ES_SYSTEMS).getroot()
+    return ET.Element("systemList")
+
+
+def our_systems(root):
+    """The <system>s that launch student games (including the legacy '112')."""
+    cmd = f"{LAUNCHER} %ROM%"
+    return [s for s in root.findall("system") if (s.findtext("command") or "").strip() == cmd]
+
+
+def system_fields(el):
+    return [(c.tag, (c.text or "").strip()) for c in el]
+
+
+def wanted_systems(games):
+    """[(name, folder, [games])] newest semester first, untagged games last."""
+    groups = {}
+    for g in games:
+        if g.enabled:
+            groups.setdefault(g.semester, []).append(g)
+    order = sorted((s for s in groups if s), reverse=True) + ([None] if None in groups else [])
+    return [(str(s) if s else OTHER_SYSTEM,
+             SEMESTER_ROMS / (s.slug if s else OTHER_SYSTEM.lower()),
+             groups[s]) for s in order]
+
+
+def system_element(name, folder):
+    el = ET.Element("system")
+    for tag, text in (("name", name),
+                      ("fullname", f"15-112 {name}" if name != OTHER_SYSTEM else "15-112 Games"),
+                      ("path", str(folder)),
+                      ("extension", ".git"),
+                      ("command", f"{LAUNCHER} %ROM%"),
+                      ("theme", "112")):
+        ET.SubElement(el, tag).text = text
+    return el
+
+
+@dataclass
+class MenuPlan:
+    """What it takes to make the ES menu match the games' semester tags."""
+    link_add: list        # [(link, target)]
+    link_remove: list     # [link]
+    dir_remove: list      # [folder]
+    systems: object       # new es_systems.cfg root, or None if unchanged
+    moves: list           # [(game, from_gamelist, to_gamelist)]
+
+    def __bool__(self):
+        return bool(self.link_add or self.link_remove or self.dir_remove
+                    or self.systems is not None or self.moves)
+
+    def describe(self):
+        lines = [f"link   {l.parent.name}/{l.name} -> {t}" for l, t in self.link_add]
+        lines += [f"unlink {l.parent.name}/{l.name}" for l in self.link_remove]
+        lines += [f"rmdir  {d}" for d in self.dir_remove]
+        if self.systems is not None:
+            names = [s.findtext("name") for s in our_systems(self.systems)]
+            lines.append(f"menu   {ES_SYSTEMS}: {', '.join(names) or '(no game systems)'}")
+        lines += [f"move   {g.name}'s gamelist entry {a.parent.name} -> {b.parent.name}"
+                  for g, a, b in self.moves]
+        return lines
+
+    def apply(self, ui):
+        for link in self.link_remove:
+            link.unlink()
+        for d in self.dir_remove:
+            d.rmdir()
+        for link, target in self.link_add:
+            link.parent.mkdir(parents=True, exist_ok=True)
+            if link.is_symlink():
+                link.unlink()
+            link.symlink_to(target)
+        if self.systems is not None:
+            ET.indent(self.systems, space="  ")
+            tmp = STUFF / f".{ES_SYSTEMS.name}.tmp"
+            tmp.write_text('<?xml version="1.0"?>\n'
+                           + ET.tostring(self.systems, encoding="unicode") + "\n")
+            if ES_SYSTEMS.exists():
+                run(["sudo", "-n", "cp", "-p", ES_SYSTEMS, f"{ES_SYSTEMS}.bak-{stamp()}"], quiet=True)
+            run(["sudo", "-n", "install", "-D", "-m", "644", "-o", "root", "-g", "root",
+                 tmp, ES_SYSTEMS], quiet=True)
+            tmp.unlink()
+        trees = {}
+        for g, src, dst in self.moves:
+            for p in (src, dst):
+                if p not in trees:
+                    trees[p] = gamelist_load(p)
+            entry = gamelist_entry(trees[src], g.dirname)
+            if entry is None:
+                continue
+            trees[src].getroot().remove(entry)
+            old = gamelist_entry(trees[dst], g.dirname)
+            if old is not None:
+                trees[dst].getroot().remove(old)
+            trees[dst].getroot().append(entry)
+        for p, tree in trees.items():
+            gamelist_save(tree, p)
+        for line in self.describe():
+            ui.info(f"  {line}")
+
+
+def plan_menu():
+    games = all_games()
+    wanted = wanted_systems(games)
+
+    # Symlinks: SEMESTER_ROMS/<semester>/<Name>.git -> ROMS/<Name>.git
+    want_links = {folder / g.dirname: g.path for _, folder, gs in wanted for g in gs}
+    have_links = {}
+    if SEMESTER_ROMS.is_dir():
+        for d in SEMESTER_ROMS.iterdir():
+            if d.is_dir() and not d.is_symlink():
+                for l in d.iterdir():
+                    if l.is_symlink():
+                        have_links[l] = Path(os.readlink(l))
+    link_add = [(l, t) for l, t in sorted(want_links.items()) if have_links.get(l) != t]
+    link_remove = sorted(l for l in have_links if l not in want_links)
+    want_dirs = {folder for _, folder, _ in wanted}
+    dir_remove = []
+    if SEMESTER_ROMS.is_dir():
+        for d in sorted(SEMESTER_ROMS.iterdir()):
+            if (d.is_dir() and not d.is_symlink() and d not in want_dirs
+                    and all(c in link_remove for c in d.iterdir())):
+                dir_remove.append(d)
+
+    # es_systems.cfg: our systems, newest first, at the top of the list
+    root = es_systems_load()
+    current = our_systems(root)
+    want_els = [system_element(name, folder) for name, folder, _ in wanted]
+    in_place = list(root)[:len(current)] == current
+    systems = None
+    if not in_place or [system_fields(e) for e in current] != [system_fields(e) for e in want_els]:
+        for s in current:
+            root.remove(s)
+        for i, el in enumerate(want_els):
+            root.insert(i, el)
+        systems = root
+
+    # Gamelist entries (display name, play count) follow the game to its system
+    moves = []
+    lists = our_gamelists()
+    loaded = {p: gamelist_load(p) for p in lists}
+    for g in games:
+        for p in lists:
+            if p != g.gamelist and gamelist_entry(loaded[p], g.dirname) is not None:
+                moves.append((g, p, g.gamelist))
+    return MenuPlan(link_add, link_remove, dir_remove, systems, moves)
+
+
+def sync_menu(ui):
+    """Make the ES menu match the games. Closes ES for a moment if anything changes,
+    since ES reads es_systems.cfg and scans for games only when it starts."""
+    if not plan_menu():
+        return False
+    with es_paused(ui, "Updating the menu"):
+        plan = plan_menu()     # again: ES may have saved gamelists while closing
+        if plan:
+            ui.info("Updating the menu:")
+            plan.apply(ui)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -593,12 +842,15 @@ def rebuild_venv(game, lock):
 def cmd_list(ui, args=None):
     games = all_games()
     gl = gamelist_info()
-    rows = [("NAME", "DISPLAY NAME", "STATE", "REPO", "BRANCH", "FROZEN", "VENV", "PLAYS")]
+    rows = [("NAME", "DISPLAY NAME", "SEMESTER", "STATE", "REPO", "BRANCH", "FROZEN", "VENV",
+             "PLAYS")]
     for g in games:
         disp, plays = gl.get(g.dirname, ("", ""))
+        sem = g.semester
         rows.append((
             g.name,
             disp if disp and disp != g.name else "-",
+            str(sem) if sem else "-",
             "enabled" if g.enabled else "DISABLED",
             g.transport,
             g.branch,
@@ -690,9 +942,11 @@ def cmd_add(ui, args):
     owner, repo = parse_github(url_in)
     default_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo).strip("-") or "Game"
     name = validate_name(args.name or ui.ask("Game folder name", default_name))
+    semester = Semester.parse(args.semester or ui.ask(
+        "Semester (e.g. Fall 2026, Spring 2027, Summer 2027)", str(Semester.current())))
     dest = ROMS / f"{name}.git"
 
-    ui.header(f"Adding {owner}/{repo} as {name}")
+    ui.header(f"Adding {owner}/{repo} as {name} ({semester})")
     https_url = f"https://github.com/{owner}/{repo}.git"
     if can_reach(https_url):
         ui.info("Repo is public; cloning over HTTPS (no key needed).")
@@ -707,6 +961,7 @@ def cmd_add(ui, args):
 
     run(["git", "clone", clone_url, dest], env=git_quiet_env())
     game = Game(name, dest, True)
+    game.set_semester(semester)
     sanity_check(ui, dest)
 
     ui.header("Installing dependencies")
@@ -715,20 +970,19 @@ def cmd_add(ui, args):
     if not args.no_launch and ui.interactive and ui.confirm(
             "Test-launch it on the arcade screen now?", default=True):
         launch(ui, game)
-        if ui.confirm("Did it work (including quitting)? Freeze its dependencies now?", default=True):
+        if ui.confirm("Did it work (including quitting)? Freeze it now (pins packages, stops pulling updates)?", default=True):
             do_freeze(ui, game)
-    elif ui.confirm("Freeze its dependencies now (without a test launch)?"):
+    elif ui.confirm("Freeze it now without a test launch (pins packages, stops pulling updates)?"):
         do_freeze(ui, game)
 
     display = args.display
     if display is None and ui.interactive:
         display = ui.ask("Display name in the menu (blank = folder name)", "")
-    if display:
-        set_display_name(ui, game, display)
-        ui.info("(EmulationStation was restarted, so the new game is already in the menu.)")
-    else:
-        offer_es_restart(ui)
-    ui.info(f"\nDone: {name} is installed at {dest}.")
+    with es_paused(ui, "Adding the game to the menu"):
+        if display:
+            set_display_name(ui, game, display)
+        sync_menu(ui)
+    ui.info(f"\nDone: {name} is installed at {dest}, under {semester} in the menu.")
 
 
 def launch(ui, game):
@@ -775,15 +1029,16 @@ def cmd_unfreeze(ui, args):
         ui.info(f"{g.name} isn't frozen.")
         return
     ui.info(g.lock.read_text())
-    if ui.confirm(f"Delete this lock file? {g.name} will then get unpinned versions "
-                  "whenever its venv is rebuilt.", destructive=True):
+    if ui.confirm(f"Delete this lock file? {g.name} will then pull from GitHub on every "
+                  "launch and get unpinned versions whenever its venv is rebuilt.",
+                  destructive=True):
         g.lock.unlink()
         ui.info(f"{g.name} is no longer frozen.")
 
 
 def set_display_name(ui, game, display):
     with es_paused(ui, "Changing the display name"):
-        tree = gamelist_load()
+        tree = gamelist_load(game.gamelist)
         entry = gamelist_entry(tree, game.dirname)
         if entry is None:
             entry = ET.SubElement(tree.getroot(), "game")
@@ -792,7 +1047,7 @@ def set_display_name(ui, game, display):
         if name_el is None:
             name_el = ET.SubElement(entry, "name")
         name_el.text = display
-        gamelist_save(tree)
+        gamelist_save(tree, game.gamelist)
     ui.info(f"{game.name} now shows as '{display}'.")
 
 
@@ -802,6 +1057,30 @@ def cmd_display_name(ui, args):
     if not display:
         raise AdminError("display name can't be empty")
     set_display_name(ui, g, display)
+
+
+def cmd_semester(ui, args):
+    g = find_game(args.game)
+    current = g.semester
+    text = args.semester or ui.ask("Semester (e.g. Fall 2026, Spring 2027, Summer 2027)",
+                                   str(current or Semester.current()))
+    sem = Semester.parse(text)
+    if sem != current:
+        g.set_semester(sem)
+    ui.info(f"{g.name} is tagged {sem}.")
+    sync_menu(ui)
+
+
+def cmd_sync_menu(ui, args):
+    plan = plan_menu()
+    if not plan:
+        ui.info("The menu already matches the games.")
+        return
+    if args.check:
+        for line in plan.describe():
+            ui.info(f"  {line}")
+        sys.exit(4)
+    sync_menu(ui)
 
 
 def cmd_rename(ui, args):
@@ -823,14 +1102,15 @@ def cmd_rename(ui, args):
         g.path.rename(new_path)
         if g.frozen:
             g.lock.rename(new_game.lock)
-        tree = gamelist_load()
+        tree = gamelist_load(g.gamelist)
         entry = gamelist_entry(tree, g.dirname)
         if entry is not None:
             entry.find("path").text = f"./{new_game.dirname}"
             name_el = entry.find("name")
             if name_el is not None and name_el.text == g.name:
                 name_el.text = new
-            gamelist_save(tree)
+            gamelist_save(tree, g.gamelist)
+        sync_menu(ui)
     ui.info(f"Renamed {g.name} -> {new}. Rebuilding its venv for the new path...")
     try:
         rebuild_venv(new_game, lock)
@@ -848,9 +1128,10 @@ def move_game(ui, g, enable):
     dest_dir.mkdir(parents=True, exist_ok=True)
     if (dest_dir / g.dirname).exists():
         raise AdminError(f"{dest_dir / g.dirname} already exists")
-    g.path.rename(dest_dir / g.dirname)
-    ui.info(f"{g.name} {'enabled' if enable else 'disabled (kept in ' + str(DISABLED) + ')'}.")
-    offer_es_restart(ui)
+    with es_paused(ui, "Updating the menu"):
+        g.path.rename(dest_dir / g.dirname)
+        ui.info(f"{g.name} {'enabled' if enable else 'disabled (kept in ' + str(DISABLED) + ')'}.")
+        sync_menu(ui)
 
 
 def cmd_disable(ui, args):
@@ -874,6 +1155,7 @@ def cmd_remove(ui, args):
         return
 
     alias = g.ssh_alias
+    gamelist = g.gamelist
     shutil.rmtree(g.path)
     g.lock.unlink(missing_ok=True)
     ui.info(f"Deleted {g.name}.")
@@ -891,14 +1173,14 @@ def cmd_remove(ui, args):
 
     try:
         with es_paused(ui, "Removing the game from the menu"):
-            tree = gamelist_load()
+            tree = gamelist_load(gamelist)
             entry = gamelist_entry(tree, g.dirname)
             if entry is not None:
                 tree.getroot().remove(entry)
-                gamelist_save(tree)
+                gamelist_save(tree, gamelist)
+            sync_menu(ui)
     except Declined:
-        ui.info("Left gamelist.xml alone (a stale entry is harmless). "
-                "The menu updates when EmulationStation next restarts.")
+        ui.info("Left the menu alone for now; run `arcade-admin sync-menu` to update it.")
 
 
 def cmd_restart_es(ui, args=None):
@@ -934,21 +1216,22 @@ def game_menu(ui, g):
         frozen = "frozen" if g.frozen else "not frozen"
         actions = [
             ("launch", "Test-launch on the arcade screen"),
-            ("freeze", "Freeze (or re-freeze) its current packages"),
-            ("unfreeze", "Delete its lock file"),
+            ("semester", "Set its semester (which menu entry it appears under)"),
+            ("freeze", "Freeze (or re-freeze) its current packages and stop pulling updates"),
+            ("unfreeze", "Delete its lock file and resume pulling updates"),
             ("display", "Set the display name in the menu"),
             ("rename", "Rename its folder"),
             ("enable" if not g.enabled else "disable",
              "Show it in the menu again" if not g.enabled else "Hide it from the menu (keeps files)"),
             ("remove", "Delete it from the box"),
         ]
-        choice = ui.choose(f"{g.name}  ({state}, {frozen}, {g.transport})", actions)
+        choice = ui.choose(f"{g.name}  ({g.system}, {state}, {frozen}, {g.transport})", actions)
         if choice is None:
             return
         ns = argparse.Namespace(game=g.name, games=[g.name], all=False,
-                                display=None, new_name=None)
+                                display=None, new_name=None, semester=None)
         handler = {
-            "launch": cmd_launch, "freeze": cmd_freeze, "unfreeze": cmd_unfreeze,
+            "launch": cmd_launch, "semester": cmd_semester, "freeze": cmd_freeze, "unfreeze": cmd_unfreeze,
             "display": cmd_display_name, "rename": cmd_rename, "enable": cmd_enable,
             "disable": cmd_disable, "remove": cmd_remove,
         }[choice]
@@ -993,13 +1276,14 @@ def menu(ui):
             games = all_games()
             gl = gamelist_info()
             tag = ui.choose("Which game?", [
-                (g.name, ("[disabled] " if not g.enabled else "")
+                (g.name, f"[{g.system}] " + ("[disabled] " if not g.enabled else "")
                  + (gl.get(g.dirname, ("",))[0] or "")
                  + ("  (frozen)" if g.frozen else "")) for g in games])
             if tag:
                 game_menu(ui, find_game(tag))
         elif choice == "add":
-            ns = argparse.Namespace(url=None, name=None, display=None, key_id=None, no_launch=False)
+            ns = argparse.Namespace(url=None, name=None, display=None, key_id=None,
+                                    no_launch=False, semester=None)
             if guarded(ui, cmd_add, ns):
                 ui.pause()
         elif choice == "freeze-all":
@@ -1033,16 +1317,17 @@ def build_parser():
     a.add_argument("url", nargs="?", help="https://github.com/OWNER/REPO, git@github.com:OWNER/REPO or OWNER/REPO")
     a.add_argument("--name", help="folder name (letters, digits, - and _)")
     a.add_argument("--display", help="display name in the menu")
+    a.add_argument("--semester", help="e.g. 'Fall 2026' or F26 (default: from today's date)")
     a.add_argument("--key-id", help="deploy-key id for private repos (default: owner)")
     a.add_argument("--no-launch", action="store_true", help="skip the test launch")
     a.set_defaults(fn=cmd_add)
 
-    f = sub.add_parser("freeze", help="pin a game's currently installed packages")
+    f = sub.add_parser("freeze", help="pin a game's installed packages and stop pulling its updates")
     f.add_argument("games", nargs="*")
     f.add_argument("--all", action="store_true", help="every enabled game")
     f.set_defaults(fn=cmd_freeze)
 
-    for name, fn, hlp in (("unfreeze", cmd_unfreeze, "delete a game's lock file"),
+    for name, fn, hlp in (("unfreeze", cmd_unfreeze, "delete a game's lock file and resume pulling"),
                           ("launch", cmd_launch, "test-launch a game on the arcade screen"),
                           ("disable", cmd_disable, "hide a game from the menu (keeps files)"),
                           ("enable", cmd_enable, "show a disabled game again"),
@@ -1055,6 +1340,16 @@ def build_parser():
     d.add_argument("game")
     d.add_argument("display", nargs="?")
     d.set_defaults(fn=cmd_display_name)
+
+    m = sub.add_parser("semester", help="set the semester a game is listed under")
+    m.add_argument("game")
+    m.add_argument("semester", nargs="?", help="e.g. 'Fall 2026', 'Spring 2027' or F26 / S27 / M27")
+    m.set_defaults(fn=cmd_semester)
+
+    y = sub.add_parser("sync-menu", help="rebuild the per-semester menu entries")
+    y.add_argument("--check", action="store_true",
+                   help="change nothing; exit 4 if the menu is out of date")
+    y.set_defaults(fn=cmd_sync_menu)
 
     r = sub.add_parser("rename", help="rename a game's folder")
     r.add_argument("game")

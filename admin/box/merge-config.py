@@ -5,7 +5,6 @@ Each subcommand makes the smallest change that gets the file into the desired
 state, and only writes (after backing the file up) when something differs.
 With --check it changes nothing and exits 1 if a change is needed.
 
-    merge-config.py es-system SNIPPET.xml [--file /etc/emulationstation/es_systems.cfg]
     merge-config.py gdm-autologin USER
     merge-config.py session USER SESSION
 
@@ -17,7 +16,6 @@ import datetime
 import re
 import shutil
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 STAMP = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -31,28 +29,6 @@ def write(path, text, check):
         shutil.copy2(path, path.with_name(f"{path.name}.bak-{STAMP}"))
     path.write_text(text)
     return 1
-
-
-def es_system(snippet, file, check):
-    """Insert or replace the <system> whose <name> matches the snippet's."""
-    wanted = ET.parse(snippet).getroot()
-    name = wanted.findtext("name")
-
-    def fields(el):
-        return {c.tag: (c.text or "").strip() for c in el}
-
-    if file.exists():
-        root = ET.parse(file).getroot()
-    else:
-        root = ET.Element("systemList")
-    current = [s for s in root.findall("system") if s.findtext("name") == name]
-    if len(current) == 1 and fields(current[0]) == fields(wanted):
-        return 0
-    for s in current:
-        root.remove(s)
-    root.insert(0, wanted)
-    ET.indent(root, space="  ")
-    return write(file, '<?xml version="1.0"?>\n' + ET.tostring(root, encoding="unicode") + "\n", check)
 
 
 def ini_set(path, section, wanted, check, create_template=None):
@@ -91,9 +67,6 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--check", action="store_true")
     sub = p.add_subparsers(dest="cmd", required=True)
-    a = sub.add_parser("es-system")
-    a.add_argument("snippet", type=Path)
-    a.add_argument("--file", type=Path, default=Path("/etc/emulationstation/es_systems.cfg"))
     g = sub.add_parser("gdm-autologin")
     g.add_argument("user")
     g.add_argument("--file", type=Path, default=Path("/etc/gdm3/custom.conf"))
@@ -102,9 +75,7 @@ def main():
     s.add_argument("session")
     args = p.parse_args()
 
-    if args.cmd == "es-system":
-        rc = es_system(args.snippet, args.file, args.check)
-    elif args.cmd == "gdm-autologin":
+    if args.cmd == "gdm-autologin":
         rc = ini_set(args.file, "daemon",
                      {"AutomaticLoginEnable": "true", "AutomaticLogin": args.user}, args.check)
     else:
