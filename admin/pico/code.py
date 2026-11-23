@@ -20,6 +20,10 @@ from adafruit_hid.keycode import Keycode
 
 ACK_TIMEOUT = 3.0      # seconds to wait for the box to answer
 HOLD_FOR_REBOOT = 5.0  # holding the button this long always reboots
+HEARTBEAT = 0          # seconds between status lines on the REPL console (0 = off)
+# For testing on a laptop: print instead of typing Alt+SysRq+REISUB (which
+# would reboot whatever machine the Pico is plugged into). False on the box.
+DRY_RUN = False
 
 kbd = Keyboard(usb_hid.devices)
 link = usb_cdc.data    # None if boot.py hasn't enabled the data port
@@ -42,6 +46,12 @@ def tap(key):
 def reisub():
     """Alt+SysRq+R,E,I,S,U,B: the kernel syncs, remounts read-only and reboots."""
     led.value = True
+    if DRY_RUN:
+        print("REISUB (dry run: no keys sent)")
+        time.sleep(2)
+        led.value = False
+        return
+    print("REISUB: sending Alt+SysRq+R,E,I,S,U,B")
     kbd.press(Keycode.ALT, Keycode.PRINT_SCREEN)
     for key in (Keycode.R, Keycode.E, Keycode.I):
         tap(key)
@@ -57,8 +67,13 @@ def reisub():
 
 def ask_box_to_restart():
     """Send the restart request; True if the box acknowledged it in time."""
-    if link is None or not link.connected:   # nothing is listening on the box
+    if link is None:
+        print("no data port (boot.py not applied?)")
         return False
+    if not link.connected:                   # nothing is listening on the box
+        print("data port not connected (nothing has it open)")
+        return False
+    print("sent RESTART-ES, waiting for ACK")
     link.reset_input_buffer()
     link.write(b"RESTART-ES\n")
     reply = b""
@@ -67,8 +82,10 @@ def ask_box_to_restart():
         if link.in_waiting:
             reply += link.read(link.in_waiting)
             if b"ACK" in reply:
+                print("got ACK")
                 return True
         time.sleep(0.02)
+    print(f"no ACK within {ACK_TIMEOUT}s (got {repr(reply)})")
     return False
 
 
@@ -81,7 +98,21 @@ def blink(times):
     led.value = False
 
 
+def heartbeat():
+    if link is None:
+        data = "missing"
+    else:
+        data = "connected" if link.connected else "not connected"
+    print(f"heartbeat t={time.monotonic():.0f} button={button.value} data port={data}"
+          f"{' DRY_RUN' if DRY_RUN else ''}")
+
+
+print("arcade reset button starting")
+next_beat = 0.0
 while True:
+    if HEARTBEAT and time.monotonic() >= next_beat:
+        heartbeat()
+        next_beat = time.monotonic() + HEARTBEAT
     if not button.value:
         time.sleep(0.02)
         continue
@@ -90,9 +121,13 @@ while True:
         continue
 
     pressed_at = time.monotonic()
+    print("button pressed")
     led.value = True
     if not ask_box_to_restart():
-        reisub()                   # never returns
+        reisub()                   # never returns (unless DRY_RUN)
+        while button.value:
+            time.sleep(0.02)
+        continue
     blink(3)
     while button.value:            # still holding: escalate to a hard reboot
         if time.monotonic() - pressed_at >= HOLD_FOR_REBOOT:
