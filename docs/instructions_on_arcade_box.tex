@@ -1,24 +1,72 @@
-\documentclass[a4paper,landscape,12pt]{article}
+\documentclass[12pt]{article}
 
-\usepackage[landscape]{geometry}
-\usepackage{fullpage}
+\usepackage[a4paper,landscape,margin=1.4cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{tgheros}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage[most]{tcolorbox}
+\usepackage{enumitem}
+
+% Colors taken from the cabinet: red P1 side, blue P2 side, dark-blue reset.
+\definecolor{arcred}{HTML}{D7263D}
+\definecolor{arcblue}{HTML}{1E5BD8}
+\definecolor{arcreset}{HTML}{0B3C5D}
+\definecolor{arcdark}{HTML}{1B1B2F}
+\definecolor{arcwood}{HTML}{F3E9DC}
+
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+
+% An arcade button, drawn like the real ones: \arcbutton{color}{label}
+\newcommand{\arcbutton}[2]{%
+  \tikz[baseline=-0.75ex]{%
+    \node[circle, fill=#1, draw=#1!55!black, line width=1.5pt,
+          text=white, font=\bfseries\normalsize, minimum size=1.2em,
+          inner sep=0pt] {#2};}}
+\newcommand{\Pone}{\arcbutton{arcred}{P1}}
+\newcommand{\Reset}{\arcbutton{arcreset}{\tiny Reset}}
+
+% Rule numbers in colored circles, alternating red and blue like the two players.
+\newcommand{\rulenum}{%
+  \ifodd\value{enumi}\colorlet{numcolor}{arcred}\else\colorlet{numcolor}{arcblue}\fi
+  \tikz[baseline=-0.75ex]{%
+    \node[circle, fill=numcolor, text=white,
+          font=\bfseries, minimum size=1.3em, inner sep=0pt] {\arabic{enumi}};}}
 
 \begin{document}
-\thispagestyle{empty}
-\begin{center}
-{\Huge \textbf{The Arcade Box}}
-\end{center}
+\Huge
 
-\huge
+\begin{tcolorbox}[enhanced, colback=arcdark, colframe=arcdark, arc=4mm,
+                  boxrule=0pt, left=8mm, right=8mm, top=4mm, bottom=4mm]
+  \centering
+  {\fontsize{50}{58}\selectfont\bfseries\color{white} The Arcade Box}\\[2mm]
+  {\LARGE\color{white!80!arcdark} Hi! I'm the 15-112 Arcade Box. My job is to play 15-112 term projects.}
+\end{tcolorbox}
 
-Hi!  I'm the 15-112 Arcade Box.  My job is to play 15-112 term projects.  Please follow these simple rules when using me:
+\vspace{3mm}
+{\huge\color{arcdark}\bfseries Please follow these simple rules when using me:}
+\vspace{3mm}
 
-\begin{enumerate}
-\item Most games can be quit by pressing the ``P1" button.
-\item If a game is locked up and unable to quit, you can press ``reset".  (But please avoid this, because it might corrupt my file system.)
-\item 15-112 students who want to port their games to this box should contact Prof. Riley.
-\item Please don't connect or disconnect things from me, including USB devices like keyboards.  If you have debugging issues, please contact Prof. Riley.
-\item Please don't break me or load other software onto me.
-
+\LARGE\raggedright
+\begin{enumerate}[leftmargin=2.2em, labelsep=0.6em,
+                  itemsep=3mm, topsep=0pt]
+  \item Most games can be quit by pressing the \Pone\ button.
+  \item If a game is stuck and won't quit, press \Reset\ \textbf{once} and wait.
+        The game will close and the menu will come back in a few seconds.
+        If it still doesn't come back, hold \Reset\ for 5~seconds to restart me.
+  \item 15-112 students who want to port their games to this box should
+        contact Prof.~Riley.
+  \item Please don't connect or disconnect things from me, including USB devices
+        like keyboards. If you have debugging issues, please contact Prof.~Riley.
+  \item Please don't break me or load other software onto me.
 \end{enumerate}
+
+\vfill
+\begin{tcolorbox}[colback=arcwood, colframe=arcwood, arc=3mm, boxrule=0pt,
+                  halign=center, top=1mm, bottom=1mm]
+  \huge\color{arcdark}\bfseries Have fun, and be creative!
+\end{tcolorbox}
+
 \end{document}
