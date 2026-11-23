@@ -35,7 +35,28 @@ A few things to know about how the tool behaves:
 
 There are also `stop-es [--force]` and `start-es` commands. `install.sh` uses them.
 
-A hung game can now be cleared over SSH with `arcade-admin restart-es --force`, so you don't need the hard-reset button. In the menu, choosing "Restart EmulationStation" while a game is running asks whether to kill the game.
+A hung game can be cleared over SSH with `arcade-admin restart-es --force`. In the menu, choosing "Restart EmulationStation" while a game is running asks whether to kill the game. The cabinet's reset button does the same thing; see the next section.
+
+## The reset button
+
+The external button is wired to GP15 of a Raspberry Pi Pico (RP2040) running CircuitPython. The Pico is plugged into the box by USB.
+
+| What you do | What happens |
+|---|---|
+| Press the button | The Pico asks the box to restart EmulationStation. The box runs `arcade-admin --yes restart-es --force`, which kills any running game. The Pico's LED blinks once the box has answered. Presses within 10 seconds of a restart are ignored. |
+| The box doesn't answer within 3 seconds | The Pico falls back to a hard reboot. It types Alt+SysRq+R,E,I,S,U,B, which the kernel handles even when userspace is wedged. |
+| Hold the button for 5 seconds | Always does the hard reboot. |
+
+This is how the pieces connect:
+
+- **On the Pico.** [`admin/pico/boot.py`](../admin/pico/boot.py) adds a second USB serial port, the *data* port, next to the CircuitPython REPL console. [`admin/pico/code.py`](../admin/pico/code.py) writes `RESTART-ES` to the data port and waits for `ACK`.
+- **On the box.** `arcade-button.service` runs [`~/stuff/arcade-button`](../admin/arcade-button) as `es`. It finds the Pico's data port, which is the higher-numbered of its two `ttyACM` devices, answers `ACK` straight away, and then runs the restart. If `arcade-admin` fails, it reboots the box. `install.sh` installs and enables the service.
+- **Logs.** Run `journalctl -u arcade-button`.
+- **Testing without the button.** Run `arcade-button --port /dev/pts/N --dry-run` against a pseudo-terminal.
+
+**To update the Pico's firmware,** copy `boot.py` and `code.py` onto its `CIRCUITPY` drive. It needs `adafruit_hid` in `lib/`, which is already there. Then unplug the Pico and plug it back in; changes to `boot.py` only take effect after a hard reset. Until `boot.py` is in place, the Pico has no data port. The service then logs that it is waiting, and every press falls back to the hard reboot.
+
+`kernel.sysrq` must stay `1`, the Ubuntu default on this box, for the fallback to work.
 
 ## Box configuration and `install.sh`
 
@@ -53,10 +74,11 @@ The script copies `admin/` to `~/stuff/arcade-setup/` on the box and runs [`box/
 | Packages | [`box/packages.txt`](../admin/box/packages.txt) | Installs any missing apt packages: git, the venv and pycairo build dependencies, openbox, dialog, fonts, and so on. |
 | Groups | `setup-box.sh` | Makes sure `es` is in `dialout` and `plugdev`. |
 | EmulationStation | `setup-box.sh` | If ES isn't installed, clones RetroPie-Setup and builds EmulationStation and the carbon-2021 theme from source. This takes a while. |
-| Launcher and tool | [`112.sh`](../admin/112.sh), [`arcade-admin`](../admin/arcade-admin) | Installs both into `~/stuff/` and links `/usr/local/bin/arcade-admin`. |
+| Launcher and tools | [`112.sh`](../admin/112.sh), [`arcade-admin`](../admin/arcade-admin), [`arcade-button`](../admin/arcade-button) | Installs all three into `~/stuff/` and links `/usr/local/bin/arcade-admin`. |
 | Config files | [`box/files/`](../admin/box/files/) | Installs each file at the same path on the box. See the list below this table. ES is closed while its own config files are replaced. |
 | `112` system | [`box/es_system_112.xml`](../admin/box/es_system_112.xml) | Inserts or replaces just that entry in `/etc/emulationstation/es_systems.cfg`. The rest of the file is left alone. |
 | Auto-login | [`box/merge-config.py`](../admin/box/merge-config.py) | Sets `AutomaticLogin=es` in `/etc/gdm3/custom.conf`, and sets `es`'s session to openbox through AccountsService. |
+| Reset button | `setup-box.sh` | Enables and starts `arcade-button.service`, and restarts it when the script or the unit changes. |
 
 These are the files under `box/files/`:
 
@@ -65,6 +87,7 @@ These are the files under `box/files/`:
 - `home/es/.config/openbox/autostart`: sets the resolution to 800x600 and starts ES in a maximized `gnome-terminal`.
 - `home/es/.fonts/LuckiestGuy.ttf`: a font one of the games uses.
 - `etc/udev/rules.d/99-input.rules`: input-device permissions.
+- `etc/systemd/system/arcade-button.service`: the reset-button listener (see [The reset button](#the-reset-button)).
 - `etc/sudoers.d/arcade-es`: passwordless sudo for `es`. The tools need it. It's checked with `visudo` before it's installed.
 
 **To change the box's configuration,** edit the files in `admin/box/` and run `install.sh`. If you change something on the box directly, for example through ES's own settings menu, copy the file back into `admin/box/files/` so the repo stays the source of truth. Running `install.sh --check` shows any drift.
@@ -82,7 +105,7 @@ These are the files under `box/files/`:
 
 - **The games and their deploy keys.** Lock files, display names, and the private keys in `~/.ssh` all live only on the box. A rebuild means re-adding each game, and private repos need their owners to add a new deploy key. If you want to avoid that, back up `~/.ssh` and `~/stuff/frozen/` somewhere private before you wipe the box.
 - **RetroArch and the libretro cores.** The old install had about 20, but none of them had any ROMs.
-- **The Raspberry Pi Pico tooling.** This is `~/src/pico-sdk`, `~/src/picotool`, `~/reset_pico.py`, and `/etc/udev/rules.d/99-picotool.rules`.
+- **The Raspberry Pi Pico's build tooling.** This is `~/src/pico-sdk`, `~/src/picotool`, `~/reset_pico.py`, and `/etc/udev/rules.d/99-picotool.rules`. The button firmware itself lives on the Pico and is version-controlled in `admin/pico/`; reinstalling the box doesn't touch it.
 - **Network settings,** such as Wi-Fi.
 - **X's default screen blanking,** which blanks the screen after 10 minutes. Being the stock default, it comes back by itself.
 
@@ -188,6 +211,7 @@ Two details shape how `arcade-admin` works:
 | `/home/es/RetroPie/roms/cmu_graphics-disabled/` | Disabled games. ES doesn't scan it. | **Yes** |
 | `/home/es/stuff/112.sh` | The launcher. Source: [`admin/112.sh`](../admin/112.sh). `112.sh.bak-2026-11-22` is the version from before freezing was added. | **Yes** |
 | `/home/es/stuff/arcade-admin` (+ `/usr/local/bin/arcade-admin` symlink) | The management tool. Source: [`admin/arcade-admin`](../admin/arcade-admin). | Tool |
+| `/home/es/stuff/arcade-button`, `/etc/systemd/system/arcade-button.service` | The reset-button listener. Source: [`admin/arcade-button`](../admin/arcade-button). | **Yes** |
 | `/home/es/stuff/frozen/<Name>.git.txt` | The lock file for each game | **Yes** |
 | `/etc/emulationstation/es_systems.cfg` | Defines the `112` system (shown above) | **Yes** |
 | `/home/es/.ssh/config`, `/home/es/.ssh/id_rsa.*`, `id_ed25519.*` | One `Host github-<id>` alias plus one deploy key per private repo. The default `id_rsa` is the deploy key for `rriley/arcade-box-test`. | **Yes** |

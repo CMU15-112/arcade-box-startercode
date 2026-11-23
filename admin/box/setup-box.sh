@@ -26,6 +26,9 @@ REBOOT_REASONS=()
 ES_NEEDS_RESTART=0
 UDEV_CHANGED=0
 FONTS_CHANGED=0
+SYSTEMD_CHANGED=0
+BUTTON_CHANGED=0
+DEPLOY_CHANGED=0
 
 say()     { printf '%s\n' "$*"; }
 status()  { printf '  %-10s %s\n' "$1" "$2"; }
@@ -105,13 +108,15 @@ done
 
 # ---------------------------------------------------------------------------
 section "launcher and arcade-admin"
-deploy() {   # deploy SRC DEST MODE
+deploy() {   # deploy SRC DEST MODE   (sets DEPLOY_CHANGED=1 if DEST changed)
     local src="$1" dest="$2" mode="$3"
+    DEPLOY_CHANGED=0
     if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
         ok "$dest"
         return
     fi
     changed "$dest"
+    DEPLOY_CHANGED=1
     if [[ $CHECK == 0 ]]; then
         [[ -f "$dest" ]] && cp -p "$dest" "$dest.bak-$STAMP"
         install -D -m "$mode" "$src" "$dest"
@@ -119,6 +124,8 @@ deploy() {   # deploy SRC DEST MODE
 }
 deploy "$ADMIN/112.sh" "$HOME/stuff/112.sh" 755
 deploy "$ADMIN/arcade-admin" "$HOME/stuff/arcade-admin" 755
+deploy "$ADMIN/arcade-button" "$HOME/stuff/arcade-button" 755
+BUTTON_CHANGED=$DEPLOY_CHANGED
 if [[ "$(readlink /usr/local/bin/arcade-admin 2>/dev/null)" == "$HOME/stuff/arcade-admin" ]]; then
     ok "/usr/local/bin/arcade-admin -> ~/stuff/arcade-admin"
 else
@@ -174,6 +181,7 @@ while IFS= read -r -d '' src; do
         "$ES_CFG"/*) ES_NEEDS_RESTART=1 ;;
         /etc/udev/*) UDEV_CHANGED=1 ;;
         /home/es/.fonts/*) FONTS_CHANGED=1 ;;
+        /etc/systemd/*) SYSTEMD_CHANGED=1 ;;
     esac
     [[ $CHECK == 1 ]] && continue
     if [[ "$dest" == /etc/sudoers.d/* ]] && ! sudo visudo -cqf "$src"; then
@@ -203,6 +211,27 @@ merge() {   # merge DESCRIPTION ARGS...
 merge "$ES_SYSTEMS: '112' system entry" es-system "$BOX/es_system_112.xml" || ES_NEEDS_RESTART=1
 merge "/etc/gdm3/custom.conf: auto-login as es" gdm-autologin es || REBOOT_REASONS+=("GDM auto-login")
 merge "AccountsService: es logs into the openbox session" session es openbox || REBOOT_REASONS+=("login session")
+
+# ---------------------------------------------------------------------------
+section "reset button service"
+# arcade-button listens to the RP2040 reset button (admin/pico/) and restarts ES.
+UNIT=arcade-button.service
+[[ $CHECK == 0 && $SYSTEMD_CHANGED == 1 ]] && sudo systemctl daemon-reload
+if systemctl is-enabled -q "$UNIT" 2>/dev/null && systemctl is-active -q "$UNIT"; then
+    if [[ $BUTTON_CHANGED == 1 || $SYSTEMD_CHANGED == 1 ]]; then
+        if [[ $CHECK == 0 ]]; then
+            sudo systemctl restart "$UNIT"
+            status "done" "restarted $UNIT"
+        else
+            status "WOULD" "restart $UNIT"
+        fi
+    else
+        ok "$UNIT is enabled and running"
+    fi
+else
+    changed "enable and start $UNIT"
+    [[ $CHECK == 0 ]] && sudo systemctl enable --now "$UNIT"
+fi
 
 # ---------------------------------------------------------------------------
 section "finishing up"

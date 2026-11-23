@@ -1,0 +1,15 @@
+[Unit]
+Description=Arcade reset button (RP2040) restarts EmulationStation
+After=display-manager.service
+
+[Service]
+User=es
+ExecStart=/usr/bin/python3 /home/es/stuff/arcade-button
+Restart=always
+RestartSec=5
+# EmulationStation is relaunched from this service; stopping or restarting the
+# service must not take ES (or a game) down with it.
+KillMode=process
+
+[Install]
+WantedBy=graphical.target

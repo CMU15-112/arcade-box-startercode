@@ -16,7 +16,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # Catch syntax errors before touching the box.
 python3 -c "import ast,sys; [ast.parse(open(f).read(), f) for f in sys.argv[1:]]" \
-    "$HERE/arcade-admin" "$HERE/box/merge-config.py"
+    "$HERE/arcade-admin" "$HERE/arcade-button" "$HERE/box/merge-config.py" \
+    "$HERE/pico/boot.py" "$HERE/pico/code.py"
 bash -n "$HERE/112.sh"
 bash -n "$HERE/box/setup-box.sh"
 
