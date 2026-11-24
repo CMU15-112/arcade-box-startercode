@@ -26,7 +26,7 @@ ssh arcade arcade-admin list        # or run a single command
 | `prepare GAME...` / `prepare --all` [`--upgrade`] | Has uv set up the game's packages now, as the next launch would, so that launch starts at once and works without the network. `--upgrade` (`-U`) re-resolves an unfrozen game's `requirements.txt` to the newest versions; frozen games stay pinned. |
 | `disable GAME` / `enable GAME` | Hides a game from the menu, or shows it again. The files are kept in `~/RetroPie/roms/cmu_graphics-disabled/`. |
 | `remove GAME` | Deletes the game, its lock file and the lock's `.bak` copies, and archives its deploy key to `~/.ssh/dead/` if no other game uses it. |
-| `restart-es [--force]` | Restarts EmulationStation so its menu picks up changes. If a game is running, it refuses unless you pass `--force` (`-f`). `--force` kills the game (its `112.sh` launcher and everything it started) first, which is useful when a game has hung and has no working quit button. It also brings ES back if ES isn't running. |
+| `restart-es [--force]` | Restarts EmulationStation so its menu picks up changes. If a game is running, it refuses unless you pass `--force` (`-f`). `--force` kills the game (its `112.sh` launcher and everything it started) first: it pauses the launcher so it can't start anything new, ends the game itself, lets what started it (uv, cage) exit on its own, and only then kills whatever is left. That's useful when a game has hung and has no working quit button. It also brings ES back if ES isn't running. |
 
 `GAME` can be any unique prefix of the folder name, and matching ignores case.
 

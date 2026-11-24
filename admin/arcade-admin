@@ -453,26 +453,68 @@ def kill_games(ui):
     roots = set(launcher_pids()) - protected
     if not roots:
         return
-    targets = set(roots)
-    children = {}
-    for d in Path("/proc").iterdir():
-        if d.name.isdigit():
-            children.setdefault(_ppid(int(d.name)), []).append(int(d.name))
-    stack = list(roots)
-    while stack:
-        for c in children.get(stack.pop(), []):
-            if c not in targets and c not in protected:
-                targets.add(c)
-                stack.append(c)
-    ui.info(f"Force-quitting the running game ({len(targets)} process(es))...")
-    for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 2)):
-        for pid in targets:
+    # Pause the launchers first, so that ending one step (say a slow git pull)
+    # can't let them go on to start the next one (the game) behind our back.
+    for pid in roots:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGSTOP)
+
+    def alive(pids):
+        """The ones still running. A dead child of a paused launcher stays a
+        zombie (state Z) until the launcher goes, so that counts as gone."""
+        running = set()
+        for p in pids:
+            try:
+                state = Path(f"/proc/{p}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            except (OSError, IndexError):
+                continue
+            if state != "Z":
+                running.add(p)
+        return running
+
+    def descendants():
+        """Everything the launchers started, and its leaves (processes with no children)."""
+        children = {}
+        for d in Path("/proc").iterdir():
+            if d.name.isdigit():
+                children.setdefault(_ppid(int(d.name)), []).append(int(d.name))
+        found, stack = set(), list(roots)
+        while stack:
+            for c in children.get(stack.pop(), []):
+                if c not in found and c not in protected and c not in roots:
+                    found.add(c)
+                    stack.append(c)
+        return found, {p for p in found if not any(c in found for c in children.get(p, []))}
+
+    # Everything ever found: a process whose parent dies is re-parented and
+    # would no longer show up as a descendant, but it still has to go.
+    seen, _ = descendants()
+    ui.info(f"Force-quitting the running game ({len(roots) + len(seen)} process(es))...")
+    # The game itself first (the leaves). What started it (uv, cage) then exits on
+    # its own. cage in particular shouldn't get SIGTERM: cage 0.1.4 aborts on it.
+    for phase, sig, wait in (("leaves", signal.SIGTERM, 3), ("all", signal.SIGTERM, 5),
+                             ("all", signal.SIGKILL, 2)):
+        found, leaves = descendants()
+        seen |= found
+        for pid in (leaves if phase == "leaves" else alive(seen)):
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(pid, sig)
         for _ in range(wait * 4):
-            if not any(Path(f"/proc/{p}").exists() for p in targets):
-                return
+            seen |= descendants()[0]
+            if not alive(seen):
+                break
             time.sleep(0.25)
+        else:
+            continue
+        break
+    # The paused launchers are only shell scripts; nothing is left for them to do.
+    for pid in alive(roots):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGKILL)
+    for _ in range(8):
+        if not alive(roots):
+            return
+        time.sleep(0.25)
 
 
 def stop_es(force=False, ui=None):
