@@ -70,4 +70,4 @@ The Pico (`239a:80f4`, CircuitPython) sends `RESTART-ES` on its second USB seria
 
 ## Git
 
-Work is on the `admin-tooling` branch (not merged or pushed). Make small, logical commits. Don't commit secrets or SSH keys.
+Do not commit unless asked. When asked, make small, logical commits. Don't commit secrets or SSH keys.
