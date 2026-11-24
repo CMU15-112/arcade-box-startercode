@@ -5,15 +5,16 @@ This repo is the starter code for 15-112 students' arcade games (`main.py`, `joy
 ## The box
 
 - RetroPie/EmulationStation (ES) on Ubuntu 22.04, Python 3.10, user `es` with NOPASSWD sudo. Reach it with `ssh arcade` (the SSH config already has the user and keys). Auto-login goes into an openbox session, which runs ES in a maximized `gnome-terminal` (`~/.config/openbox/autostart`).
-- Each game is a git clone at `~/RetroPie/roms/cmu_graphics/<Name>.git`, launched by `~/stuff/112.sh %ROM%`. Each game has a semester tag (`git config arcade.semester "Fall 2026"` in its own repo). ES shows one system per semester, newest first, plus "Other" for untagged games. `arcade-admin sync-menu` builds these from the tags: it writes the systems at the top of `/etc/emulationstation/es_systems.cfg` (every system whose command is `112.sh` counts as its own), creates symlink folders in `~/RetroPie/roms/cmu_graphics-semesters/<semester>/`, and moves gamelist entries to `gamelists/<semester>/`. Every command that changes a game calls it. Lock files are `~/stuff/frozen/<Name>.git.txt`; `112.sh` installs them before `requirements.txt` so that working games keep working when packages update, and skips `git pull` for any game that has one.
-- The `/home/es/...` paths, `/opt/retropie/...` paths and the `es` username are hard-coded throughout. Venvs also hard-code their absolute path, so **renaming or moving a game requires rebuilding its `retropie-venv`**.
+- Each game is a git clone at `~/RetroPie/roms/cmu_graphics/<Name>.git`, launched by `~/stuff/112.sh %ROM%`. Each game has a semester tag (`git config arcade.semester "Fall 2026"` in its own repo). ES shows one system per semester, newest first, plus "Other" for untagged games. `arcade-admin sync-menu` builds these from the tags: it writes the systems at the top of `/etc/emulationstation/es_systems.cfg` (every system whose command is `112.sh` counts as its own), creates symlink folders in `~/RetroPie/roms/cmu_graphics-semesters/<semester>/`, and moves gamelist entries to `gamelists/<semester>/`. Every command that changes a game calls it. Lock files are `~/stuff/frozen/<Name>.git.txt` (pip requirements format, exact versions); `112.sh` runs a frozen game with its lock instead of `requirements.txt`, so working games keep working when packages update, and skips `git pull` for it.
+- The `/home/es/...` paths, `/opt/retropie/...` paths and the `es` username are hard-coded throughout.
 - `cmu-graphics` 3.x needs Python 3.11 or newer, so the box gets 1.1.44. Don't promise otherwise.
+- Games run with `uv run --no-project --isolated --python /usr/bin/python3 --with-requirements <lock or requirements.txt> python main.py` (`--with cmu-graphics` if a game has neither). There are no per-game venvs: uv keeps each environment in `~/.cache/uv`, so never prune or clean that cache casually (`arcade-admin prepare --all` rebuilds everything, with network). `--isolated` is required: without it the system's apt packages (PIL, cairo, sdl2) leak in. `arcade-admin`'s `deps_args()`/`uv_run()` must stay in step with `112.sh`. uv is `/usr/local/bin/uv`, pinned by `UV_VERSION` in `setup-box.sh`; `~/.config/uv/uv.toml` forbids Python downloads. No `uv.lock`, `uv sync` or `uv pip install` into venvs.
 
 ## Repo layout (`admin/`)
 
 | Path | Deployed to | What it is |
 |---|---|---|
-| `112.sh` | `~/stuff/112.sh` | The launcher: pull (unless frozen), venv, pip (with the lock file), run `main.py`. |
+| `112.sh` | `~/stuff/112.sh` | The launcher: pull (unless frozen), then `uv run` `main.py` with the lock file or `requirements.txt`. |
 | `arcade-admin` | `~/stuff/arcade-admin`, symlinked at `/usr/local/bin/arcade-admin` | SSH-only game manager (menu + subcommands). Single-file, stdlib-only Python 3. |
 | `arcade-button` | `~/stuff/arcade-button` | Daemon for the reset button; run by `arcade-button.service`. Needs `python3-serial`. |
 | `pico/boot.py`, `pico/code.py` | Copied by hand to the Pico's CIRCUITPY drive | Firmware for the RP2040 reset button. Not deployed by `install.sh`. |
@@ -32,7 +33,7 @@ Deploy and verify with `admin/install.sh --check` (report only) and `admin/insta
 - The `es` user matches `%sudo`, so `sudo -v` asks for a password. Use `sudo -n true 2>/dev/null || sudo true`.
 - `~/.local/bin` isn't on PATH for `ssh host cmd`; that's why tools are linked into `/usr/local/bin`.
 - Private game repos use a per-repo deploy key and a `Host github-<id>` alias in `~/.ssh/config`. Public repos use HTTPS. Don't touch existing `id_rsa.*` keys or Host blocks.
-- Back up before overwriting; the tools write `.bak-<timestamp>` files. Leave every game's working tree alone except `retropie-venv`.
+- Back up before overwriting; the tools write `.bak-<timestamp>` files. Leave every game's working tree alone.
 - Game names must match `^[A-Za-z0-9_-]+$`: `112.sh` does `cd $1` unquoted, so spaces break it (the "bee-game (demo)" folder is an existing victim).
 
 ## Testing
@@ -60,9 +61,9 @@ The Pico (`239a:80f4`, CircuitPython) sends `RESTART-ES` on its second USB seria
 
 ## Known issues
 
-- Insomnia has no `cmu_graphics` in its venv and is broken.
 - Arcade-Box-Starter-Code and cmu_rush can't pull (deploy keys rejected).
 - Professor-Invaders has local changes to its score files.
+- `rename` leaves the old `<path>` entry in the semester gamelist, so the display name doesn't follow the game.
 - The fresh-box path in `setup-box.sh` (building ES from source) has not been tested.
 
 ## Git

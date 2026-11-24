@@ -1,0 +1,5 @@
+# uv settings for the es user: 112.sh, arcade-admin and anything run by hand.
+# Games run on the system Python 3.10 (cmu-graphics 3.x would need 3.11+), so
+# uv must never download or pick a Python of its own.
+python-downloads = "never"
+python-preference = "only-system"

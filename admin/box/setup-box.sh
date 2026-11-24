@@ -78,6 +78,24 @@ for grp in dialout plugdev; do
 done
 
 # ---------------------------------------------------------------------------
+section "uv"
+# uv builds and updates the game venvs (112.sh, arcade-admin). Pinned so that
+# every rebuild behaves the same; bump UV_VERSION deliberately.
+UV_VERSION=0.13.9
+if [[ "$(/usr/local/bin/uv --version 2>/dev/null)" == "uv $UV_VERSION "* ]]; then
+    ok "/usr/local/bin/uv $UV_VERSION"
+else
+    changed "install uv $UV_VERSION in /usr/local/bin"
+    if [[ $CHECK == 0 ]]; then
+        tmp="$(mktemp -d)"
+        curl -fsSL "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$tmp" --strip-components=1
+        sudo install -m 755 "$tmp/uv" "$tmp/uvx" /usr/local/bin/
+        rm -rf "$tmp"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 section "EmulationStation"
 if [[ -x "$ES_BIN" ]]; then
     ok "EmulationStation is installed"

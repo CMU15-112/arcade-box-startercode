@@ -6,10 +6,9 @@ openssh-server
 git
 curl
 
-# building game venvs (pycairo builds from source and needs the cairo headers)
-python3-venv
+# game packages: uv (installed by setup-box.sh) builds them; pycairo builds from
+# source and needs the Python and cairo headers
 python3-dev
-python3-pip
 python3-serial
 pkg-config
 libcairo2-dev

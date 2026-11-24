@@ -16,6 +16,7 @@ This tool is deliberately not reachable from the EmulationStation menu.
 import argparse
 import contextlib
 import datetime
+import glob
 import os
 import re
 import shutil
@@ -47,7 +48,18 @@ GIT_SEMESTER_KEY = "arcade.semester"   # stored in each game's .git/config
 SSH_DIR = HOME / ".ssh"
 SSH_CONFIG = SSH_DIR / "config"
 SSH_DEAD = SSH_DIR / "dead"
-VENV = "retropie-venv"
+# Games run with `uv run`, which keeps each game's environment in uv's cache
+# (~/.cache/uv). uv's settings for the box are in ~/.config/uv/uv.toml.
+UV = Path("/usr/local/bin/uv")           # installed by setup-box.sh
+SYSTEM_PYTHON = "/usr/bin/python3"       # games need 3.10 (cmu-graphics 3.x would need 3.11+)
+DEFAULT_DEPS = "cmu-graphics"            # what 112.sh assumes for a game with no requirements.txt
+LEGACY_VENV = "retropie-venv"            # per-game venvs from before uv; unused
+# Never written to lock files (pip freeze always left these out).
+FREEZE_SKIP = {"pip", "setuptools", "wheel", "distribute"}
+# Prints the packages of the environment it runs in, one `name==version` per line.
+LIST_PACKAGES = ("import importlib.metadata as m; "
+                 "print('\\n'.join(sorted({f\"{d.metadata['Name']}=={d.version}\" "
+                 "for d in m.distributions()}, key=str.lower)))")
 
 ES_BIN = "/opt/retropie/supplementary/emulationstation/emulationstation"
 ES_RESTART_FLAG = Path("/tmp/es-restart")
@@ -188,7 +200,7 @@ class UI:
 
 class DialogUI(UI):
     """Uses `dialog` for menus. Everything else stays plain text so command
-    output (git, pip, warnings) remains visible on the SSH terminal."""
+    output (git, uv, warnings) remains visible on the SSH terminal."""
 
     def choose(self, title, options):
         cmd = ["dialog", "--stdout", "--title", "arcade-admin", "--menu", title,
@@ -283,10 +295,6 @@ class Game:
     @property
     def lock(self):
         return FROZEN / f"{self.dirname}.txt"
-
-    @property
-    def venv(self):
-        return self.path / VENV
 
     @property
     def frozen(self):
@@ -781,58 +789,67 @@ def ssh_remove_alias(alias):
 
 
 # ---------------------------------------------------------------------------
-# Virtual environments and lock files
+# Game packages (uv run) and lock files
 # ---------------------------------------------------------------------------
 
-def venv_python(game):
-    return game.venv / "bin" / "python"
+def uv():
+    if not os.access(UV, os.X_OK):
+        raise AdminError(f"uv isn't installed at {UV}; run admin/install.sh from the repo")
+    return UV
 
 
-def pip_freeze(game):
-    py = venv_python(game)
-    if not py.exists():
-        return None
-    res = run([py, "-m", "pip", "freeze", "--exclude-editable"], capture=True, check=False)
+def deps_args(game, unfrozen=False):
+    """The packages 112.sh runs the game with, as `uv run` flags. unfrozen=True
+    gives what it would use without the lock file."""
+    if game.frozen and not unfrozen:
+        return ["--with-requirements", game.lock]
+    if (game.path / "requirements.txt").exists():
+        return ["--with-requirements", game.path / "requirements.txt"]
+    return ["--with", DEFAULT_DEPS]
+
+
+def deps_source(game, unfrozen=False):
+    if game.frozen and not unfrozen:
+        return "lock"
+    return "requirements.txt" if (game.path / "requirements.txt").exists() else DEFAULT_DEPS
+
+
+def uv_run(game, *cmd, deps, upgrade=False, capture=False):
+    """Run a command in the game's environment, exactly as 112.sh does. With
+    capture, -q keeps uv's own progress messages out of the output."""
+    return run([uv(), "run", "--no-project", "--isolated", "--python", SYSTEM_PYTHON,
+                *(["-q"] if capture else []), *(["--upgrade"] if upgrade else []),
+                *deps, *cmd],
+               cwd=game.path, capture=capture, check=False)
+
+
+def prepare(game, upgrade=False):
+    """Have uv build (or, with upgrade, re-resolve) the game's environment now, so
+    the next launch starts at once and doesn't need the network."""
+    res = uv_run(game, "python", "-c", "", deps=deps_args(game), upgrade=upgrade)
     if res.returncode != 0:
-        raise AdminError(f"pip freeze failed for {game.name}:\n{res.stdout}")
-    return res.stdout.strip()
+        raise AdminError(f"uv couldn't set up the packages for {game.name} (see above)")
 
 
-def write_lock(game, dest):
-    pkgs = pip_freeze(game)
-    if not pkgs:
-        return None
+def resolved_packages(game):
+    """`name==version` lines for what the game runs with when it isn't frozen."""
+    res = uv_run(game, "python", "-c", LIST_PACKAGES,
+                 deps=deps_args(game, unfrozen=True), capture=True)
+    if res.returncode != 0:
+        raise AdminError(f"uv couldn't set up the packages for {game.name}:\n{res.stdout}")
+    return [line for line in res.stdout.splitlines()
+            if "==" in line and line.split("==")[0].strip().lower() not in FREEZE_SKIP]
+
+
+def write_lock(game):
+    pkgs = resolved_packages(game)
     FROZEN.mkdir(parents=True, exist_ok=True)
+    if game.lock.exists():
+        shutil.copy2(game.lock, f"{game.lock}.bak-{stamp()}")
     today = datetime.date.today().isoformat()
-    dest.write_text(f"# Frozen {today} from {game.dirname}/{VENV} by arcade-admin\n{pkgs}\n")
+    game.lock.write_text(f"# Frozen {today} from {deps_source(game, unfrozen=True)} "
+                         f"by arcade-admin\n" + "\n".join(pkgs) + "\n")
     return pkgs
-
-
-def pip_install(game, *args):
-    run([venv_python(game), "-m", "pip", "install", "--disable-pip-version-check", *args],
-        cwd=game.path)
-
-
-def build_venv(game):
-    """Same dependency steps as 112.sh."""
-    if not game.venv.exists():
-        run(["python3", "-m", "venv", game.venv])
-    req = game.path / "requirements.txt"
-    if game.frozen:
-        pip_install(game, "-r", game.lock)
-        if req.exists():
-            pip_install(game, "-r", req, "-c", game.lock)
-    elif req.exists():
-        pip_install(game, "-r", req)
-
-
-def rebuild_venv(game, lock):
-    shutil.rmtree(game.venv, ignore_errors=True)
-    run(["python3", "-m", "venv", game.venv])
-    if lock:
-        pip_install(game, "-r", lock)
-    else:
-        build_venv(game)
 
 
 # ---------------------------------------------------------------------------
@@ -842,7 +859,7 @@ def rebuild_venv(game, lock):
 def cmd_list(ui, args=None):
     games = all_games()
     gl = gamelist_info()
-    rows = [("NAME", "DISPLAY NAME", "SEMESTER", "STATE", "REPO", "BRANCH", "FROZEN", "VENV",
+    rows = [("NAME", "DISPLAY NAME", "SEMESTER", "STATE", "REPO", "BRANCH", "FROZEN", "DEPS",
              "PLAYS")]
     for g in games:
         disp, plays = gl.get(g.dirname, ("", ""))
@@ -855,7 +872,7 @@ def cmd_list(ui, args=None):
             g.transport,
             g.branch,
             "yes" if g.frozen else "no",
-            "yes" if venv_python(g).exists() else "no",
+            deps_source(g),
             plays or "-",
         ))
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
@@ -874,14 +891,14 @@ def sanity_check(ui, path):
     else:
         head = req.read_bytes()[:2]
         if head in (b"\xff\xfe", b"\xfe\xff"):
-            ui.info("note: requirements.txt is UTF-16 (pip copes, but it's unusual)")
+            ui.info("note: requirements.txt is UTF-16 (uv copes, but it's unusual)")
     bundled = [p.name for p in (path / "cmu_graphics", path / "cmu_graphics.py") if p.exists()]
     if bundled:
-        warnings.append(f"repo contains {', '.join(bundled)}, which shadows the pip-installed "
-                        "cmu_graphics and usually breaks the game")
+        warnings.append(f"repo contains {', '.join(bundled)}, which shadows the installed "
+                        "cmu_graphics package and usually breaks the game")
     has_exit = False
     for py in path.rglob("*.py"):
-        if VENV in py.parts:
+        if LEGACY_VENV in py.parts:
             continue
         try:
             if "sys.exit" in py.read_text(errors="ignore"):
@@ -938,6 +955,7 @@ def setup_deploy_key(ui, owner, repo, key_id):
 
 
 def cmd_add(ui, args):
+    uv()   # fail before cloning anything
     url_in = args.url or ui.ask("GitHub repo URL")
     owner, repo = parse_github(url_in)
     default_name = re.sub(r"[^A-Za-z0-9_-]+", "-", repo).strip("-") or "Game"
@@ -965,7 +983,7 @@ def cmd_add(ui, args):
     sanity_check(ui, dest)
 
     ui.header("Installing dependencies")
-    build_venv(game)
+    prepare(game)
 
     if not args.no_launch and ui.interactive and ui.confirm(
             "Test-launch it on the arcade screen now?", default=True):
@@ -997,28 +1015,48 @@ def cmd_launch(ui, args):
     launch(ui, find_game(args.game))
 
 
+def cmd_prepare(ui, args):
+    games = all_games() if args.all else [find_game(q) for q in args.games]
+    if not games:
+        raise AdminError("name one or more games, or use --all")
+    failed = []
+    for g in games:
+        ui.header(f"Preparing {g.name} (from {deps_source(g)})")
+        if args.upgrade and g.frozen:
+            ui.info("Frozen: its versions are pinned, so --upgrade changes nothing.")
+        try:
+            prepare(g, upgrade=args.upgrade)
+        except AdminError as e:
+            ui.warn(str(e))
+            failed.append(g.name)
+    if failed:
+        raise AdminError(f"failed for {', '.join(failed)}")
+    ui.info(f"\nReady: {', '.join(g.name for g in games)}")
+
+
 def do_freeze(ui, game):
-    pkgs = write_lock(game, game.lock)
-    if pkgs is None:
-        ui.info(f"SKIP  {game.name}: venv is missing or empty (launch it once first)")
-        return False
+    pkgs = write_lock(game)
     ui.info(f"OK    {game.name} -> {game.lock}")
-    for line in pkgs.splitlines():
+    for line in pkgs:
         ui.info(f"        {line}")
     return True
 
 
 def cmd_freeze(ui, args):
     if args.all:
-        games = [g for g in all_games() if g.enabled]
+        games = [g for g in all_games() if g.enabled and not g.frozen]
+        if not games:
+            ui.info("Every enabled game is already frozen.")
     elif args.games:
         games = [find_game(q) for q in args.games]
     else:
         raise AdminError("name one or more games, or use --all")
     for g in games:
-        if g.frozen and not args.all and not ui.confirm(
-                f"{g.name} is already frozen. Replace its lock with what's installed now?",
-                default=True):
+        if g.frozen and not ui.confirm(
+                f"{g.name} is already frozen. Replace its lock with a fresh one from "
+                f"{deps_source(g, unfrozen=True)}? That can bring in newer versions; the "
+                "old lock is kept as a .bak file. Test-launch it afterwards.",
+                default=False):
             continue
         do_freeze(ui, g)
 
@@ -1029,10 +1067,10 @@ def cmd_unfreeze(ui, args):
         ui.info(f"{g.name} isn't frozen.")
         return
     ui.info(g.lock.read_text())
-    if ui.confirm(f"Delete this lock file? {g.name} will then pull from GitHub on every "
-                  "launch and get unpinned versions whenever its venv is rebuilt.",
-                  destructive=True):
-        g.lock.unlink()
+    if ui.confirm(f"Remove this lock file? {g.name} will then pull from GitHub on every "
+                  "launch and run with the versions its requirements.txt resolves to. "
+                  "(The lock is kept as a .bak file.)", destructive=True):
+        g.lock.rename(f"{g.lock}.bak-{stamp()}")
         ui.info(f"{g.name} is no longer frozen.")
 
 
@@ -1089,15 +1127,6 @@ def cmd_rename(ui, args):
     new_path = g.path.parent / f"{new}.git"
     new_game = Game(new, new_path, g.enabled)
 
-    # The venv hard-codes its path, so it has to be rebuilt. Pin it first so the
-    # rebuild reproduces exactly what's installed now.
-    tmp_lock = None
-    if g.frozen:
-        lock = new_game.lock
-    else:
-        tmp_lock = STUFF / f".rename-{g.dirname}.txt"
-        lock = tmp_lock if write_lock(g, tmp_lock) else None
-
     with es_paused(ui, "Renaming"):
         g.path.rename(new_path)
         if g.frozen:
@@ -1111,13 +1140,7 @@ def cmd_rename(ui, args):
                 name_el.text = new
             gamelist_save(tree, g.gamelist)
         sync_menu(ui)
-    ui.info(f"Renamed {g.name} -> {new}. Rebuilding its venv for the new path...")
-    try:
-        rebuild_venv(new_game, lock)
-    finally:
-        if tmp_lock:
-            tmp_lock.unlink(missing_ok=True)
-    ui.info(f"Done. {new} is ready.")
+    ui.info(f"Renamed {g.name} -> {new}.")
 
 
 def move_game(ui, g, enable):
@@ -1158,6 +1181,8 @@ def cmd_remove(ui, args):
     gamelist = g.gamelist
     shutil.rmtree(g.path)
     g.lock.unlink(missing_ok=True)
+    for bak in FROZEN.glob(f"{glob.escape(g.lock.name)}.bak-*"):
+        bak.unlink()
     ui.info(f"Deleted {g.name}.")
 
     if alias and alias.startswith("github-") and not any(o.ssh_alias == alias for o in all_games()):
@@ -1221,6 +1246,7 @@ def game_menu(ui, g):
             ("unfreeze", "Delete its lock file and resume pulling updates"),
             ("display", "Set the display name in the menu"),
             ("rename", "Rename its folder"),
+            ("prepare", "Have uv set up its packages now (so the next launch is instant)"),
             ("enable" if not g.enabled else "disable",
              "Show it in the menu again" if not g.enabled else "Hide it from the menu (keeps files)"),
             ("remove", "Delete it from the box"),
@@ -1228,11 +1254,12 @@ def game_menu(ui, g):
         choice = ui.choose(f"{g.name}  ({g.system}, {state}, {frozen}, {g.transport})", actions)
         if choice is None:
             return
-        ns = argparse.Namespace(game=g.name, games=[g.name], all=False,
+        ns = argparse.Namespace(game=g.name, games=[g.name], all=False, upgrade=False,
                                 display=None, new_name=None, semester=None)
         handler = {
             "launch": cmd_launch, "semester": cmd_semester, "freeze": cmd_freeze, "unfreeze": cmd_unfreeze,
-            "display": cmd_display_name, "rename": cmd_rename, "enable": cmd_enable,
+            "display": cmd_display_name, "rename": cmd_rename, "prepare": cmd_prepare,
+            "enable": cmd_enable,
             "disable": cmd_disable, "remove": cmd_remove,
         }[choice]
         if not guarded(ui, handler, ns):
@@ -1263,7 +1290,7 @@ def menu(ui):
             ("list", "List all games"),
             ("manage", "Manage a game (launch, freeze, rename, disable, remove...)"),
             ("add", "Add a new game from GitHub"),
-            ("freeze-all", "Freeze every enabled game"),
+            ("freeze-all", "Freeze every enabled game that isn't frozen yet"),
             ("restart-es", "Restart EmulationStation"),
             ("quit", "Exit"),
         ])
@@ -1322,10 +1349,17 @@ def build_parser():
     a.add_argument("--no-launch", action="store_true", help="skip the test launch")
     a.set_defaults(fn=cmd_add)
 
-    f = sub.add_parser("freeze", help="pin a game's installed packages and stop pulling its updates")
+    f = sub.add_parser("freeze", help="pin the package versions a game runs with and stop pulling its updates")
     f.add_argument("games", nargs="*")
-    f.add_argument("--all", action="store_true", help="every enabled game")
+    f.add_argument("--all", action="store_true", help="every enabled game that isn't frozen")
     f.set_defaults(fn=cmd_freeze)
+
+    v = sub.add_parser("prepare", help="have uv set up games' packages now")
+    v.add_argument("games", nargs="*")
+    v.add_argument("--all", action="store_true", help="every game, enabled or not")
+    v.add_argument("-U", "--upgrade", action="store_true",
+                   help="re-resolve unpinned requirements to the newest versions")
+    v.set_defaults(fn=cmd_prepare)
 
     for name, fn, hlp in (("unfreeze", cmd_unfreeze, "delete a game's lock file and resume pulling"),
                           ("launch", cmd_launch, "test-launch a game on the arcade screen"),
