@@ -94,6 +94,18 @@ else
         rm -rf "$tmp"
     fi
 fi
+# Pythons other than the system one, for games that have one set
+# (git config arcade.python, set by `arcade-admin python`).
+while read -r py; do
+    if [[ -x /usr/local/bin/uv ]] && /usr/local/bin/uv python find "$py" >/dev/null 2>&1; then
+        ok "Python $py (for games that use it)"
+    else
+        changed "install Python $py with uv (for games that use it)"
+        [[ $CHECK == 0 ]] && /usr/local/bin/uv python install "$py"
+    fi
+done < <(for d in "$HOME"/RetroPie/roms/cmu_graphics/*.git "$HOME"/RetroPie/roms/cmu_graphics-disabled/*.git; do
+             [[ -d "$d" ]] && git -C "$d" config --get arcade.python || true
+         done 2>/dev/null | sort -u)
 
 # ---------------------------------------------------------------------------
 section "EmulationStation"

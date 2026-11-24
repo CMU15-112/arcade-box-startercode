@@ -16,6 +16,7 @@ ssh arcade arcade-admin list        # or run a single command
 | `list` | Lists every game with its display name, semester, enabled/disabled state, repo access (`https`, `alias:github-<id>`, or `ssh-default`), branch, frozen status, where its packages come from (`lock`, `requirements.txt`, or `cmu-graphics` when it has neither), and play count. |
 | `add URL [--name N] [--semester S] [--display "Pretty"] [--key-id ID] [--no-launch]` | Adds a game. See [Adding a game](#adding-a-game). |
 | `semester GAME [S]` | Sets the semester the game is listed under, such as `"Fall 2026"`, `F26`, `S27` or `M27` (summer). See [Semesters](#semesters). |
+| `python GAME [VERSION]` | Sets the Python version the game runs on, such as `3.14`, or `system` for the box's own 3.10 (the default). Installs that Python with uv if needed, then sets up the game's packages on it; if they don't install, the game stays on its old Python. See [Python versions](#python-versions). |
 | `sync-menu [--check]` | Rebuilds the per-semester menu entries from the games' tags. The other commands do this on their own; `install.sh` runs it too. |
 | `launch GAME` | Test-launches the game on the arcade screen, the same way EmulationStation does. ES is closed during the launch and restarted afterwards. |
 | `freeze GAME...` / `freeze --all` | Pins the package versions the game runs with, and its code: a frozen game no longer pulls from GitHub. `--all` freezes every enabled game that isn't frozen yet. Re-freezing a frozen game asks first, since it re-resolves from `requirements.txt`. The old lock is kept as a `.bak` file. See [Frozen dependencies](#frozen-dependencies). |
@@ -76,7 +77,7 @@ The script copies `admin/` to `~/stuff/arcade-setup/` on the box and runs [`box/
 |---|---|---|
 | Packages | [`box/packages.txt`](../admin/box/packages.txt) | Installs any missing apt packages: git, the pycairo build dependencies, openbox, dialog, fonts, and so on. |
 | Groups | `setup-box.sh` | Makes sure `es` is in `dialout` and `plugdev`. |
-| uv | `setup-box.sh` (`UV_VERSION`) | Installs the pinned version of [uv](https://docs.astral.sh/uv/) as `/usr/local/bin/uv` and `uvx`, from its GitHub release. Change `UV_VERSION` to upgrade. Its settings are in `~/.config/uv/uv.toml` (from `box/files/`). |
+| uv | `setup-box.sh` (`UV_VERSION`) | Installs the pinned version of [uv](https://docs.astral.sh/uv/) as `/usr/local/bin/uv` and `uvx`, from its GitHub release. Change `UV_VERSION` to upgrade. Its settings are in `~/.config/uv/uv.toml` (from `box/files/`). Also installs, with `uv python install`, any Python version a game is set to use, so a rebuilt box gets them back. |
 | EmulationStation | `setup-box.sh` | If ES isn't installed, clones RetroPie-Setup and builds EmulationStation and the carbon-2021 theme from source. This takes a while. |
 | Launcher and tools | [`112.sh`](../admin/112.sh), [`arcade-admin`](../admin/arcade-admin), [`arcade-button`](../admin/arcade-button) | Installs all three into `~/stuff/` and links `/usr/local/bin/arcade-admin`. |
 | Config files | [`box/files/`](../admin/box/files/) | Installs each file at the same path on the box. See the list below this table. ES is closed while its own config files are replaced. |
@@ -191,7 +192,7 @@ You only need to step in when one of these happens:
 
 uv sets up each game's packages the first time it runs and reuses them from then on, so an ordinary launch doesn't change any versions. The risk is a game whose environment has to be set up again, or a newly added game, getting whatever is newest on PyPI. Most student `requirements.txt` files just say `cmu-graphics` with no version.
 
-The installed games currently use cmu-graphics versions from 1.1.23 to 1.1.44, each with its own Pillow, pygame and pycairo. cmu-graphics 3.x is out, but it needs Python 3.11 or newer. The box runs 3.10, so today a fresh environment gets 1.1.44. That changes the moment Python on the box is upgraded. For the same reason, `~/.config/uv/uv.toml` stops uv from ever downloading or choosing a Python of its own.
+The installed games currently use cmu-graphics versions from 1.1.23 to 1.1.44, each with its own Pillow, pygame and pycairo. cmu-graphics 3.x is out, but it needs Python 3.11 or newer. The box runs 3.10, so today a fresh environment gets 1.1.44. That changes for any game you move to a newer Python (see below). For the same reason, `~/.config/uv/uv.toml` stops uv from ever downloading a Python by itself.
 
 The lock files in `~/stuff/frozen/<Name>.git.txt` close this gap. Each one is an ordinary pip requirements file listing the exact version of every package the game ran with (`arcade-admin freeze` reads them from the game's environment).
 
@@ -199,6 +200,23 @@ The lock files in `~/stuff/frozen/<Name>.git.txt` close this gap. Each one is an
 - A lock file also freezes the code: `112.sh` skips `git pull` for a game that has one, so a student push can't break a working game. See [Updating a game](#updating-a-game).
 - A frozen game runs with its lock file instead of `requirements.txt`, so it gets exactly those versions, even if uv has to set the environment up again.
 - Professor-Invaders has no `requirements.txt`, so it depends entirely on its lock file. An unfrozen game without a `requirements.txt` (currently term_project-skhachat) gets just `cmu-graphics`.
+
+## Python versions
+
+Every game runs on the box's system Python 3.10 unless you choose another version for it:
+
+```bash
+arcade-admin python Cool-Game 3.14      # back to the default: arcade-admin python Cool-Game system
+```
+
+The setting is stored in the game's own `.git/config` (`git config arcade.python 3.14`), like its semester, so `git pull` leaves it alone and students can't change it. It follows the game through `rename`, `disable` and `enable`. `list` shows it in the PYTHON column.
+
+Other Pythons come from uv (`~/.local/share/uv/python/`). uv never downloads one by itself: `arcade-admin python` runs `uv python install` when needed, and `setup-box.sh` reinstalls every version a game uses.
+
+Things to know before switching a game:
+
+- **A frozen game's lock was made for its old Python.** Old pins such as pycairo 1.25 or pygame 2.5 often have nothing for 3.14, so the switch fails and the game stays as it was. Unfreeze it, switch, test-launch, then freeze it again. The lock file's first line records the Python it was made on.
+- **An unpinned `cmu-graphics` resolves to 3.x on Python 3.11 or newer**, not 1.1.44. cmu-graphics 3.x may not behave the same as 1.1.x, so test the game properly.
 
 ## How the box is wired together
 
@@ -224,7 +242,7 @@ The carbon-2021 theme has no `112` artwork, so the main screen shows each system
 **Every directory in `~/RetroPie/roms/cmu_graphics/` whose name ends in `.git` is a game.** The menu shows the directory name without `.git`, unless gamelist.xml gives it a display name. When someone picks a game, EmulationStation runs [`112.sh`](../admin/112.sh) with the path of the game's symlink in its semester folder. The script:
 
 1. `cd`s into the game directory and, unless the game is frozen (has a lock file), runs `git pull`. It first sets `core.fsync` so a hard reset is less likely to corrupt the repo.
-2. Sets `CI=False` and runs `uv run --no-project --isolated --python /usr/bin/python3 --with-requirements <lock file> python main.py`. An unfrozen game uses its `requirements.txt` instead of a lock, or `--with cmu-graphics` if it has neither.
+2. Sets `CI=False` and runs `uv run --no-project --isolated --python <python> --with-requirements <lock file> python main.py`. `<python>` is the game's `arcade.python` setting, or `/usr/bin/python3` if it has none. An unfrozen game uses its `requirements.txt` instead of a lock, or `--with cmu-graphics` if it has neither.
 
 There are no per-game venvs. uv builds an environment for each set of requirements the first time it sees it, keeps it in its cache (`~/.cache/uv`), and reuses it on every later launch. That takes about 50 ms and needs no network. A pull that changes `requirements.txt` gets a new environment automatically. `--isolated` keeps the system's apt Python packages (`/usr/lib/python3/dist-packages` has PIL, cairo, sdl2 and more) out of the games. Because nothing depends on the game's path, `rename`, `disable` and `enable` just move the folder.
 
@@ -246,7 +264,8 @@ One detail shapes how `arcade-admin` works:
 | `/home/es/stuff/arcade-button`, `/etc/systemd/system/arcade-button.service` | The reset-button listener. Source: [`admin/arcade-button`](../admin/arcade-button). | **Yes** |
 | `/home/es/stuff/frozen/<Name>.git.txt` | The lock file for each game (`.bak-<timestamp>` files are earlier locks) | **Yes** |
 | `/home/es/.cache/uv/` | uv's cache, which holds every game's installed packages | **Yes** |
-| `/home/es/.config/uv/uv.toml` | uv settings: never download or choose a non-system Python. Source: [`admin/box/files/`](../admin/box/files/). | **Yes** |
+| `/home/es/.config/uv/uv.toml` | uv settings: prefer the system Python, and never download a Python except through `uv python install`. Source: [`admin/box/files/`](../admin/box/files/). | **Yes** |
+| `/home/es/.local/share/uv/python/` | Pythons installed by uv for games that have `arcade.python` set | **Yes** |
 | `/etc/emulationstation/es_systems.cfg` | Defines one system per semester (shown above) | **Yes** |
 | `/home/es/.ssh/config`, `/home/es/.ssh/id_rsa.*`, `id_ed25519.*` | One `Host github-<id>` alias plus one deploy key per private repo. The default `id_rsa` is the deploy key for `rriley/arcade-box-test`. | **Yes** |
 | `/opt/retropie/configs/all/emulationstation/gamelists/<semester>/gamelist.xml` | Display names, play counts, and favorites | Yes |
@@ -285,9 +304,9 @@ Use the alias, not `github.com`. A clone from `git@github.com:...` uses the defa
 
 **Test launch:** close ES first, then run `DISPLAY=:0 ~/stuff/112.sh ~/RetroPie/roms/cmu_graphics/Cool-Game.git`. Closing ES matters because otherwise it keeps reading the joysticks behind the game.
 
-**Freeze:** `uv pip compile --python /usr/bin/python3 Cool-Game.git/requirements.txt -o ~/stuff/frozen/Cool-Game.git.txt`. This resolves fresh versions rather than reading the ones the game ran with, so test-launch afterwards.
+**Freeze:** `uv pip compile --python /usr/bin/python3 Cool-Game.git/requirements.txt -o ~/stuff/frozen/Cool-Game.git.txt`. This resolves fresh versions rather than reading the ones the game ran with, so test-launch afterwards. Use the game's Python version instead of `/usr/bin/python3` if it has one set.
 
-**Run something in a game's environment:** from the game folder, `uv run --no-project --isolated --python /usr/bin/python3 --with-requirements requirements.txt python` (use the lock file for a frozen game). To give a game an extra package, add it to its `requirements.txt` or lock file; there's no venv to install into.
+**Run something in a game's environment:** from the game folder, `uv run --no-project --isolated --python /usr/bin/python3 --with-requirements requirements.txt python` (use the game's Python version if it has one, and the lock file for a frozen game). To give a game an extra package, add it to its `requirements.txt` or lock file; there's no venv to install into.
 
 **Remove:**
 1. Delete the folder and its lock file.

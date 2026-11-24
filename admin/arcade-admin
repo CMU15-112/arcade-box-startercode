@@ -45,13 +45,15 @@ GAMELISTS = Path("/opt/retropie/configs/all/emulationstation/gamelists")   # <sy
 LEGACY_SYSTEM = "112"      # the single system used before semesters; its gamelist is migrated
 OTHER_SYSTEM = "Other"     # menu entry for games without a semester
 GIT_SEMESTER_KEY = "arcade.semester"   # stored in each game's .git/config
+GIT_PYTHON_KEY = "arcade.python"       # optional Python version for a game, e.g. 3.14
 SSH_DIR = HOME / ".ssh"
 SSH_CONFIG = SSH_DIR / "config"
 SSH_DEAD = SSH_DIR / "dead"
 # Games run with `uv run`, which keeps each game's environment in uv's cache
 # (~/.cache/uv). uv's settings for the box are in ~/.config/uv/uv.toml.
 UV = Path("/usr/local/bin/uv")           # installed by setup-box.sh
-SYSTEM_PYTHON = "/usr/bin/python3"       # games need 3.10 (cmu-graphics 3.x would need 3.11+)
+SYSTEM_PYTHON = "/usr/bin/python3"       # 3.10; games use it unless they have arcade.python set
+PYTHON_RE = re.compile(r"^3\.\d+(\.\d+)?$")
 DEFAULT_DEPS = "cmu-graphics"            # what 112.sh assumes for a game with no requirements.txt
 LEGACY_VENV = "retropie-venv"            # per-game venvs from before uv; unused
 # Never written to lock files (pip freeze always left these out).
@@ -316,6 +318,23 @@ class Game:
 
     def set_semester(self, sem):
         run(["git", "-C", self.path, "config", GIT_SEMESTER_KEY, str(sem)], quiet=True)
+
+    @property
+    def python(self):
+        """The Python version an admin chose for this game, or None for the system one."""
+        return self.git("config", "--get", GIT_PYTHON_KEY) or None
+
+    def set_python(self, version):
+        if version:
+            run(["git", "-C", self.path, "config", GIT_PYTHON_KEY, version], quiet=True)
+        else:
+            run(["git", "-C", self.path, "config", "--unset", GIT_PYTHON_KEY],
+                quiet=True, check=False)
+
+    @property
+    def python_request(self):
+        """What 112.sh passes to `uv run --python`."""
+        return self.python or SYSTEM_PYTHON
 
     @property
     def system(self):
@@ -817,7 +836,7 @@ def deps_source(game, unfrozen=False):
 def uv_run(game, *cmd, deps, upgrade=False, capture=False):
     """Run a command in the game's environment, exactly as 112.sh does. With
     capture, -q keeps uv's own progress messages out of the output."""
-    return run([uv(), "run", "--no-project", "--isolated", "--python", SYSTEM_PYTHON,
+    return run([uv(), "run", "--no-project", "--isolated", "--python", game.python_request,
                 *(["-q"] if capture else []), *(["--upgrade"] if upgrade else []),
                 *deps, *cmd],
                cwd=game.path, capture=capture, check=False)
@@ -847,7 +866,8 @@ def write_lock(game):
     if game.lock.exists():
         shutil.copy2(game.lock, f"{game.lock}.bak-{stamp()}")
     today = datetime.date.today().isoformat()
-    game.lock.write_text(f"# Frozen {today} from {deps_source(game, unfrozen=True)} "
+    py = f"Python {game.python}" if game.python else "the system Python"
+    game.lock.write_text(f"# Frozen {today} from {deps_source(game, unfrozen=True)} on {py} "
                          f"by arcade-admin\n" + "\n".join(pkgs) + "\n")
     return pkgs
 
@@ -860,7 +880,7 @@ def cmd_list(ui, args=None):
     games = all_games()
     gl = gamelist_info()
     rows = [("NAME", "DISPLAY NAME", "SEMESTER", "STATE", "REPO", "BRANCH", "FROZEN", "DEPS",
-             "PLAYS")]
+             "PYTHON", "PLAYS")]
     for g in games:
         disp, plays = gl.get(g.dirname, ("", ""))
         sem = g.semester
@@ -873,6 +893,7 @@ def cmd_list(ui, args=None):
             g.branch,
             "yes" if g.frozen else "no",
             deps_source(g),
+            g.python or "system",
             plays or "-",
         ))
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
@@ -1109,6 +1130,36 @@ def cmd_semester(ui, args):
     sync_menu(ui)
 
 
+def cmd_python(ui, args):
+    g = find_game(args.game)
+    current = g.python or "system"
+    text = args.version or ui.ask("Python version (e.g. 3.14), or 'system' for the box's "
+                                  "own Python 3.10", current)
+    new = None if text.strip().lower() in ("system", "default", "") else text.strip()
+    if new and not PYTHON_RE.match(new):
+        raise AdminError(f"'{text}' isn't a Python version like 3.14 or 3.14.1")
+    if new == g.python:
+        ui.info(f"{g.name} already uses {current}.")
+        return
+    if new and run([uv(), "python", "find", new], capture=True, check=False).returncode != 0:
+        if not ui.confirm(f"Python {new} isn't installed. Install it with uv now?", default=True):
+            raise Declined()
+        run([uv(), "python", "install", new])
+    old = g.python
+    g.set_python(new)
+    ui.info(f"Setting up {g.name}'s packages on {new or 'the system Python'}...")
+    try:
+        prepare(g)
+    except AdminError:
+        g.set_python(old)
+        hint = (" Its lock file pins versions made for the old Python; unfreeze it, set "
+                "the Python, test it, and freeze it again." if g.frozen else "")
+        raise AdminError(f"{g.name}'s packages don't install on {new or 'the system Python'}, "
+                         f"so it stays on {current}.{hint}")
+    ui.info(f"{g.name} now runs on {'Python ' + new if new else 'the system Python'}. "
+            "Test-launch it before leaving it that way.")
+
+
 def cmd_sync_menu(ui, args):
     plan = plan_menu()
     if not plan:
@@ -1242,6 +1293,7 @@ def game_menu(ui, g):
         actions = [
             ("launch", "Test-launch on the arcade screen"),
             ("semester", "Set its semester (which menu entry it appears under)"),
+            ("python", "Set its Python version (default: the system's 3.10)"),
             ("freeze", "Freeze (or re-freeze) its current packages and stop pulling updates"),
             ("unfreeze", "Delete its lock file and resume pulling updates"),
             ("display", "Set the display name in the menu"),
@@ -1255,9 +1307,9 @@ def game_menu(ui, g):
         if choice is None:
             return
         ns = argparse.Namespace(game=g.name, games=[g.name], all=False, upgrade=False,
-                                display=None, new_name=None, semester=None)
+                                display=None, new_name=None, semester=None, version=None)
         handler = {
-            "launch": cmd_launch, "semester": cmd_semester, "freeze": cmd_freeze, "unfreeze": cmd_unfreeze,
+            "launch": cmd_launch, "semester": cmd_semester, "python": cmd_python, "freeze": cmd_freeze, "unfreeze": cmd_unfreeze,
             "display": cmd_display_name, "rename": cmd_rename, "prepare": cmd_prepare,
             "enable": cmd_enable,
             "disable": cmd_disable, "remove": cmd_remove,
@@ -1379,6 +1431,11 @@ def build_parser():
     m.add_argument("game")
     m.add_argument("semester", nargs="?", help="e.g. 'Fall 2026', 'Spring 2027' or F26 / S27 / M27")
     m.set_defaults(fn=cmd_semester)
+
+    py = sub.add_parser("python", help="set the Python version a game runs on")
+    py.add_argument("game")
+    py.add_argument("version", nargs="?", help="e.g. 3.14, or 'system' for the box's Python 3.10")
+    py.set_defaults(fn=cmd_python)
 
     y = sub.add_parser("sync-menu", help="rebuild the per-semester menu entries")
     y.add_argument("--check", action="store_true",

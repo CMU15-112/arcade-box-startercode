@@ -23,10 +23,13 @@ else
         DEPS=(--with cmu-graphics)
     fi
 fi
+# The system Python unless an admin chose another version for this game
+# (arcade-admin python GAME VERSION).
+PYTHON="$(git config --get arcade.python || echo /usr/bin/python3)"
 # uv builds an environment with these packages the first time and reuses it from
 # its cache (~/.cache/uv) after that. --isolated keeps the system's apt Python
 # packages out. uv's settings for the box are in ~/.config/uv/uv.toml.
 echo "Running ${1}..."
 export CI=False
-/usr/local/bin/uv run --no-project --isolated --python /usr/bin/python3 "${DEPS[@]}" python main.py
+/usr/local/bin/uv run --no-project --isolated --python "$PYTHON" "${DEPS[@]}" python main.py
 echo "Back from the run..."
