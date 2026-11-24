@@ -26,6 +26,7 @@ REBOOT_REASONS=()
 ES_NEEDS_RESTART=0
 UDEV_CHANGED=0
 FONTS_CHANGED=0
+OPENBOX_CHANGED=0
 SYSTEMD_CHANGED=0
 BUTTON_CHANGED=0
 DEPLOY_CHANGED=0
@@ -211,6 +212,7 @@ while IFS= read -r -d '' src; do
         "$ES_CFG"/*) ES_NEEDS_RESTART=1 ;;
         /etc/udev/*) UDEV_CHANGED=1 ;;
         /home/es/.fonts/*) FONTS_CHANGED=1 ;;
+        /home/es/.config/openbox/*) OPENBOX_CHANGED=1 ;;
         /etc/systemd/*) SYSTEMD_CHANGED=1 ;;
     esac
     [[ $CHECK == 1 ]] && continue
@@ -287,6 +289,14 @@ if [[ $CHECK == 0 ]]; then
     if [[ $FONTS_CHANGED == 1 ]]; then
         fc-cache -f >/dev/null
         status "done" "refreshed the font cache"
+    fi
+    if [[ $OPENBOX_CHANGED == 1 ]]; then
+        # Applies to windows opened from now on
+        if DISPLAY=:0 XAUTHORITY="/run/user/$(id -u)/gdm/Xauthority" openbox --reconfigure 2>/dev/null; then
+            status "done" "reloaded the openbox config"
+        else
+            status "note" "openbox isn't running; its config applies at the next login"
+        fi
     fi
     if [[ $ES_WAS_STOPPED == 1 ]]; then
         arcade-admin start-es

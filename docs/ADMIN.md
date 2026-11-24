@@ -75,7 +75,7 @@ The script copies `admin/` to `~/stuff/arcade-setup/` on the box and runs [`box/
 
 | Step | Source in the repo | What it does on the box |
 |---|---|---|
-| Packages | [`box/packages.txt`](../admin/box/packages.txt) | Installs any missing apt packages: git, the pycairo build dependencies, openbox, dialog, fonts, and so on. |
+| Packages | [`box/packages.txt`](../admin/box/packages.txt) | Installs any missing apt packages: git, the pycairo build dependencies, openbox, cage, dialog, fonts, and so on. |
 | Groups | `setup-box.sh` | Makes sure `es` is in `dialout` and `plugdev`. |
 | uv | `setup-box.sh` (`UV_VERSION`) | Installs the pinned version of [uv](https://docs.astral.sh/uv/) as `/usr/local/bin/uv` and `uvx`, from its GitHub release. Change `UV_VERSION` to upgrade. Its settings are in `~/.config/uv/uv.toml` (from `box/files/`). Also installs, with `uv python install`, any Python version a game is set to use, so a rebuilt box gets them back. |
 | EmulationStation | `setup-box.sh` | If ES isn't installed, clones RetroPie-Setup and builds EmulationStation and the carbon-2021 theme from source. This takes a while. |
@@ -90,6 +90,8 @@ These are the files under `box/files/`:
 - `opt/retropie/configs/all/emulationstation/es_settings.cfg`: the carbon-2021 theme, **Kiosk UI mode**, a 5-minute dim screensaver, and saving gamelists on exit.
 - `opt/retropie/configs/all/emulationstation/es_input.cfg`: the joystick mapping for the cabinet's DragonRise encoder.
 - `home/es/.config/openbox/autostart`: sets the resolution to 800x600 and starts ES in a maximized `gnome-terminal`.
+- `home/es/.config/openbox/rc.xml`: Ubuntu's openbox config plus one rule: every window is maximized with no title bar, so games (and cage's window) get the full 800x600. Openbox reloads it when `install.sh` changes it.
+- `etc/apport/blacklist.d/cage`: stops Ubuntu's crash dialog for cage (see [cmu-graphics 3 games run in cage](#cmu-graphics-3-games-run-in-cage)).
 - `home/es/.fonts/LuckiestGuy.ttf`: a font one of the games uses.
 - `etc/udev/rules.d/99-input.rules`: input-device permissions.
 - `etc/systemd/system/arcade-button.service`: the reset-button listener (see [The reset button](#the-reset-button)).
@@ -217,6 +219,18 @@ Things to know before switching a game:
 
 - **A frozen game's lock was made for its old Python.** Old pins such as pycairo 1.25 or pygame 2.5 often have nothing for 3.14, so the switch fails and the game stays as it was. Unfreeze it, switch, test-launch, then freeze it again. The lock file's first line records the Python it was made on.
 - **An unpinned `cmu-graphics` resolves to 3.x on Python 3.11 or newer**, not 1.1.44. cmu-graphics 3.x may not behave the same as 1.1.x, so test the game properly.
+- **Games on Python 3.11 or newer run inside cage.** See below.
+
+### cmu-graphics 3 games run in cage
+
+cmu-graphics 3 (tested with 3.0.2) crashes on X11 when its window covers almost the whole screen, with `PanicException: Must set size of surface before calling present()`. On the cabinet every 800x600 game does. It's a bug in cmu-graphics' Rust window code (`cmu_graphics_helpers`, via softbuffer): it draws its first frame before it has set the surface size. It doesn't show on a laptop, whose screen is bigger than the game and which usually runs Wayland. Smaller windows (800x590), a bigger screen (1024x768) and Wayland all avoid it; fullscreen mode, another window manager and the scale factor don't.
+
+So `112.sh` runs every game whose Python is 3.11 or newer in [cage](https://github.com/cage-kiosk/cage), a Wayland kiosk compositor, as a window inside the X session (`WLR_BACKENDS=x11 cage -d -- uv run ...`). cmu-graphics then uses its Wayland code, which works. Games on the system Python 3.10 run as before. Details:
+
+- openbox maximizes every window without a title bar (`~/.config/openbox/rc.xml`), so cage's window covers the screen. `-d` stops the game reserving space for a title bar of its own.
+- The joystick should work as usual, since `joystick.py` reads it through pygame rather than through the window, but this hasn't been play-tested yet.
+- cage 0.1.4 sometimes aborts as it shuts down after its game exits. That's harmless (the game is over and `112.sh` carries on), but Ubuntu would show a crash dialog on the arcade screen, so `/etc/apport/blacklist.d/cage` turns crash reports off for cage. It also logs an error about `/tmp/.X11-unix/X0` because it can't start its own X server; that's harmless too.
+- To stop using cage once cmu-graphics is fixed, take the cage branch out of `112.sh`.
 
 ## How the box is wired together
 
@@ -242,7 +256,7 @@ The carbon-2021 theme has no `112` artwork, so the main screen shows each system
 **Every directory in `~/RetroPie/roms/cmu_graphics/` whose name ends in `.git` is a game.** The menu shows the directory name without `.git`, unless gamelist.xml gives it a display name. When someone picks a game, EmulationStation runs [`112.sh`](../admin/112.sh) with the path of the game's symlink in its semester folder. The script:
 
 1. `cd`s into the game directory and, unless the game is frozen (has a lock file), runs `git pull`. It first sets `core.fsync` so a hard reset is less likely to corrupt the repo.
-2. Sets `CI=False` and runs `uv run --no-project --isolated --python <python> --with-requirements <lock file> python main.py`. `<python>` is the game's `arcade.python` setting, or `/usr/bin/python3` if it has none. An unfrozen game uses its `requirements.txt` instead of a lock, or `--with cmu-graphics` if it has neither.
+2. Sets `CI=False` and runs `uv run --no-project --isolated --python <python> --with-requirements <lock file> python main.py`. `<python>` is the game's `arcade.python` setting, or `/usr/bin/python3` if it has none. An unfrozen game uses its `requirements.txt` instead of a lock, or `--with cmu-graphics` if it has neither. A game on Python 3.11 or newer runs inside cage (see [cmu-graphics 3 games run in cage](#cmu-graphics-3-games-run-in-cage)).
 
 There are no per-game venvs. uv builds an environment for each set of requirements the first time it sees it, keeps it in its cache (`~/.cache/uv`), and reuses it on every later launch. That takes about 50 ms and needs no network. A pull that changes `requirements.txt` gets a new environment automatically. `--isolated` keeps the system's apt Python packages (`/usr/lib/python3/dist-packages` has PIL, cairo, sdl2 and more) out of the games. Because nothing depends on the game's path, `rename`, `disable` and `enable` just move the folder.
 
@@ -264,6 +278,7 @@ One detail shapes how `arcade-admin` works:
 | `/home/es/stuff/arcade-button`, `/etc/systemd/system/arcade-button.service` | The reset-button listener. Source: [`admin/arcade-button`](../admin/arcade-button). | **Yes** |
 | `/home/es/stuff/frozen/<Name>.git.txt` | The lock file for each game (`.bak-<timestamp>` files are earlier locks) | **Yes** |
 | `/home/es/.cache/uv/` | uv's cache, which holds every game's installed packages | **Yes** |
+| `/home/es/.config/openbox/rc.xml` | openbox settings: every window maximized with no title bar. Source: [`admin/box/files/`](../admin/box/files/). `/etc/xdg/openbox/rc.xml` is no longer used. | **Yes** |
 | `/home/es/.config/uv/uv.toml` | uv settings: prefer the system Python, and never download a Python except through `uv python install`. Source: [`admin/box/files/`](../admin/box/files/). | **Yes** |
 | `/home/es/.local/share/uv/python/` | Pythons installed by uv for games that have `arcade.python` set | **Yes** |
 | `/etc/emulationstation/es_systems.cfg` | Defines one system per semester (shown above) | **Yes** |

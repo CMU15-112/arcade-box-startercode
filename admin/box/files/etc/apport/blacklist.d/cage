@@ -1,0 +1,4 @@
+# cage 0.1.4 sometimes aborts as it shuts down after a game exits (it runs
+# cmu-graphics 3 games; see admin/112.sh). The game is already over by then, so
+# don't let Ubuntu put a crash dialog on the arcade screen.
+/usr/bin/cage

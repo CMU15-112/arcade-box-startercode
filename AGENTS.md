@@ -4,11 +4,12 @@ This repo is the starter code for 15-112 students' arcade games (`main.py`, `joy
 
 ## The box
 
-- RetroPie/EmulationStation (ES) on Ubuntu 22.04, Python 3.10, user `es` with NOPASSWD sudo. Reach it with `ssh arcade` (the SSH config already has the user and keys). Auto-login goes into an openbox session, which runs ES in a maximized `gnome-terminal` (`~/.config/openbox/autostart`).
+- RetroPie/EmulationStation (ES) on Ubuntu 22.04, Python 3.10, user `es` with NOPASSWD sudo. Reach it with `ssh arcade` (the SSH config already has the user and keys). Auto-login goes into an openbox session, which runs ES in a maximized `gnome-terminal` (`~/.config/openbox/autostart`). `~/.config/openbox/rc.xml` (in `box/files/`) maximizes every window with no title bar.
 - Each game is a git clone at `~/RetroPie/roms/cmu_graphics/<Name>.git`, launched by `~/stuff/112.sh %ROM%`. Each game has a semester tag (`git config arcade.semester "Fall 2026"` in its own repo). ES shows one system per semester, newest first, plus "Other" for untagged games. `arcade-admin sync-menu` builds these from the tags: it writes the systems at the top of `/etc/emulationstation/es_systems.cfg` (every system whose command is `112.sh` counts as its own), creates symlink folders in `~/RetroPie/roms/cmu_graphics-semesters/<semester>/`, and moves gamelist entries to `gamelists/<semester>/`. Every command that changes a game calls it. Lock files are `~/stuff/frozen/<Name>.git.txt` (pip requirements format, exact versions); `112.sh` runs a frozen game with its lock instead of `requirements.txt`, so working games keep working when packages update, and skips `git pull` for it.
 - The `/home/es/...` paths, `/opt/retropie/...` paths and the `es` username are hard-coded throughout.
 - `cmu-graphics` 3.x needs Python 3.11 or newer, so games on the system Python 3.10 get 1.1.44. Don't promise otherwise.
 - Games run with `uv run --no-project --isolated --python <python> --with-requirements <lock or requirements.txt> python main.py` (`--with cmu-graphics` if a game has neither). There are no per-game venvs: uv keeps each environment in `~/.cache/uv`, so never prune or clean that cache casually (`arcade-admin prepare --all` rebuilds everything, with network). `--isolated` is required: without it the system's apt packages (PIL, cairo, sdl2) leak in. `arcade-admin`'s `deps_args()`/`uv_run()` must stay in step with `112.sh`. `<python>` is the game's `arcade.python` git config (set with `arcade-admin python GAME 3.14`; uv-managed Pythons, installed only by `uv python install`), else `/usr/bin/python3`. uv is `/usr/local/bin/uv`, pinned by `UV_VERSION` in `setup-box.sh`; `~/.config/uv/uv.toml` sets `python-downloads = "manual"` and `python-preference = "system"`. No `uv.lock`, `uv sync` or `uv pip install` into venvs.
+- cmu-graphics 3 crashes on X11 when its window fills the screen (`Must set size of surface before calling present()`), so `112.sh` runs games on Python 3.11+ inside cage on Wayland (`WLR_BACKENDS=x11 cage -d -- ...`), nested in the X session. `/etc/apport/blacklist.d/cage` hides cage's occasional abort on shutdown.
 
 ## Repo layout (`admin/`)
 
@@ -61,6 +62,7 @@ The Pico (`239a:80f4`, CircuitPython) sends `RESTART-ES` on its second USB seria
 
 ## Known issues
 
+- cmu-graphics 3.0.2's X11 crash with screen-sized windows is upstream's bug (CMU CS Academy); cage is a workaround. Joystick input inside cage hasn't been play-tested yet.
 - Arcade-Box-Starter-Code and cmu_rush can't pull (deploy keys rejected).
 - Professor-Invaders has local changes to its score files.
 - `rename` leaves the old `<path>` entry in the semester gamelist, so the display name doesn't follow the game.
